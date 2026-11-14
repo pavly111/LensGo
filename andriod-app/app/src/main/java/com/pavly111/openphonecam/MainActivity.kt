@@ -13,6 +13,7 @@ import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.media.MediaCodecList
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
@@ -45,6 +46,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import java.io.File
 
 data class ResolutionOption(
     val label: String,
@@ -57,6 +59,7 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var cameraManager: CameraManager
     private lateinit var cameraId: String
+    private var sensorOrientation = 90
     private var previewSize by mutableStateOf(Size(1920, 1080))
     private var options: List<ResolutionOption> = emptyList()
 
@@ -67,6 +70,11 @@ class MainActivity : ComponentActivity() {
     private var textureView: TextureView? = null
     private var opening = false
     private var permissionGranted by mutableStateOf(false)
+
+    private var recorder: Recorder? = null
+    private var recordingFile: File? = null
+    private var recording by mutableStateOf(false)
+    private var status by mutableStateOf("")
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -137,18 +145,31 @@ class MainActivity : ComponentActivity() {
                                     color = Color.White
                                 )
                             }
+                            if (status.isNotEmpty()) {
+                                Text(text = status, color = Color.Yellow)
+                            }
                             Row(
                                 modifier = Modifier.padding(top = 8.dp),
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 options.forEach { option ->
                                     Button(
+                                        enabled = !recording,
                                         onClick = { changeResolution(option.size) },
                                         contentPadding = PaddingValues(horizontal = 10.dp)
                                     ) {
                                         Text(option.label)
                                     }
                                 }
+                            }
+                            Button(
+                                enabled = !recording,
+                                onClick = { startRecording() },
+                                modifier = Modifier
+                                    .padding(top = 8.dp)
+                                    .fillMaxWidth()
+                            ) {
+                                Text(if (recording) "Recording..." else "Record 10 seconds")
                             }
                         }
                     } else {
@@ -170,6 +191,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onPause() {
         closeCamera()
+        recorder?.finish()
+        recorder = null
+        recording = false
         stopThread()
         super.onPause()
     }
@@ -181,8 +205,9 @@ class MainActivity : ComponentActivity() {
                 .get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK
         } ?: ids.first()
 
-        val map = cameraManager.getCameraCharacteristics(cameraId)
-            .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)!!
+        val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+        sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+        val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)!!
         val sizes = map.getOutputSizes(SurfaceTexture::class.java).toList()
         Log.d("OpenPhoneCam", "Camera sizes: " + sizes.joinToString { "${it.width}x${it.height}" })
 
@@ -226,6 +251,64 @@ class MainActivity : ComponentActivity() {
         if (size == previewSize) return
         closeCamera()
         previewSize = size
+        status = ""
+        Handler(Looper.getMainLooper()).postDelayed({ startCameraIfReady() }, 400)
+    }
+
+    private fun startRecording() {
+        val option = options.firstOrNull { it.size == previewSize }
+        if (option == null) {
+            status = "No supported option selected"
+            return
+        }
+        if (!option.h264 && !option.hevc) {
+            status = "This phone cannot encode ${option.label}"
+            return
+        }
+        val mime = if (option.h264) "video/avc" else "video/hevc"
+        val bitrate = when {
+            option.size.width >= 3840 -> 40_000_000
+            option.size.width >= 1920 -> 12_000_000
+            else -> 6_000_000
+        }
+        val dir = getExternalFilesDir(Environment.DIRECTORY_MOVIES)
+        if (dir == null) {
+            status = "No storage folder available"
+            return
+        }
+        val file = File(dir, "test_${option.label}.mp4")
+
+        try {
+            val newRecorder = Recorder(file, option.size, mime, bitrate, 30, sensorOrientation)
+            newRecorder.prepare()
+            recorder = newRecorder
+        } catch (e: Exception) {
+            Log.e("OpenPhoneCam", "Recorder error: ${e.message}")
+            status = "Encoder error: ${e.message}"
+            return
+        }
+
+        recordingFile = file
+        recording = true
+        status = "Recording ${option.label} (${if (option.h264) "H.264" else "HEVC"})"
+        closeCamera()
+        Handler(Looper.getMainLooper()).postDelayed({ startCameraIfReady() }, 400)
+        Handler(Looper.getMainLooper()).postDelayed({ stopRecording() }, 10_500)
+    }
+
+    private fun stopRecording() {
+        if (!recording) return
+        closeCamera()
+        recorder?.finish()
+        recorder = null
+        recording = false
+        val file = recordingFile
+        if (file != null && file.exists()) {
+            val megabytes = file.length() / 1024.0 / 1024.0
+            status = "Saved ${file.name} (${"%.1f".format(megabytes)} MB)"
+        } else {
+            status = "Recording failed"
+        }
         Handler(Looper.getMainLooper()).postDelayed({ startCameraIfReady() }, 400)
     }
 
@@ -279,15 +362,31 @@ class MainActivity : ComponentActivity() {
     @Suppress("DEPRECATION")
     private fun startPreview(camera: CameraDevice, view: TextureView) {
         val texture = view.surfaceTexture ?: return
-        texture.setDefaultBufferSize(previewSize.width, previewSize.height)
-        val surface = Surface(texture)
+        val activeRecorder = recorder
+        val bufferSize = if (activeRecorder != null && previewSize.width > 1920) {
+            Size(1280, 720)
+        } else {
+            previewSize
+        }
+        texture.setDefaultBufferSize(bufferSize.width, bufferSize.height)
+        val previewSurface = Surface(texture)
 
-        val requestBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
-        requestBuilder.addTarget(surface)
+        val template = if (activeRecorder != null) {
+            CameraDevice.TEMPLATE_RECORD
+        } else {
+            CameraDevice.TEMPLATE_PREVIEW
+        }
+        val requestBuilder = camera.createCaptureRequest(template)
+        val surfaces = mutableListOf(previewSurface)
+        requestBuilder.addTarget(previewSurface)
+        if (activeRecorder != null) {
+            surfaces.add(activeRecorder.inputSurface)
+            requestBuilder.addTarget(activeRecorder.inputSurface)
+        }
         requestBuilder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
 
         camera.createCaptureSession(
-            listOf(surface),
+            surfaces,
             object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(session: CameraCaptureSession) {
                     captureSession = session
@@ -295,6 +394,8 @@ class MainActivity : ComponentActivity() {
                 }
 
                 override fun onConfigureFailed(session: CameraCaptureSession) {
+                    Log.e("OpenPhoneCam", "Camera session configuration failed")
+                    runOnUiThread { status = "Camera session failed for this setting" }
                 }
             },
             cameraHandler
