@@ -3,6 +3,7 @@ package com.pavly111.openphonecam
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.util.Size
@@ -44,9 +45,29 @@ class Streamer(
         format.setInteger(MediaFormat.KEY_FRAME_RATE, fps)
         format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
         format.setInteger(MediaFormat.KEY_PRIORITY, 0)
+        format.setInteger(MediaFormat.KEY_OPERATING_RATE, fps)
         format.setInteger("prepend-sps-pps-to-idr-frames", 1)
 
         val codec = MediaCodec.createEncoderByType(mime)
+        Log.d("OpenPhoneCam", "Encoder in use: ${codec.name}")
+
+        val encoderCaps = codec.codecInfo.getCapabilitiesForType(mime).encoderCapabilities
+        if (encoderCaps != null &&
+            encoderCaps.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+        ) {
+            format.setInteger(
+                MediaFormat.KEY_BITRATE_MODE,
+                MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
+            )
+            Log.d("OpenPhoneCam", "Bitrate mode: CBR")
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            format.setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            format.setInteger(MediaFormat.KEY_LATENCY, 1)
+        }
+
         codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         inputSurface = codec.createInputSurface()
         codec.start()
