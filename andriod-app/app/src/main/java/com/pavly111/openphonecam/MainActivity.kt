@@ -13,7 +13,6 @@ import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.media.MediaCodecList
 import android.os.Bundle
-import android.os.Environment
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
@@ -21,6 +20,7 @@ import android.util.Log
 import android.util.Size
 import android.view.Surface
 import android.view.TextureView
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -46,7 +46,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import java.io.File
 
 data class ResolutionOption(
     val label: String,
@@ -57,9 +56,10 @@ data class ResolutionOption(
 
 class MainActivity : ComponentActivity() {
 
+    private val streamPort = 5000
+
     private lateinit var cameraManager: CameraManager
     private lateinit var cameraId: String
-    private var sensorOrientation = 90
     private var previewSize by mutableStateOf(Size(1920, 1080))
     private var options: List<ResolutionOption> = emptyList()
 
@@ -71,9 +71,10 @@ class MainActivity : ComponentActivity() {
     private var opening = false
     private var permissionGranted by mutableStateOf(false)
 
-    private var recorder: Recorder? = null
-    private var recordingFile: File? = null
-    private var recording by mutableStateOf(false)
+    private var streamer: Streamer? = null
+    private var streaming by mutableStateOf(false)
+    private var streamInfo by mutableStateOf("")
+    private var clientConnected by mutableStateOf(false)
     private var status by mutableStateOf("")
 
     private val permissionLauncher =
@@ -84,6 +85,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         cameraManager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
         pickCamera()
 
@@ -145,6 +147,12 @@ class MainActivity : ComponentActivity() {
                                     color = Color.White
                                 )
                             }
+                            if (streaming) {
+                                Text(
+                                    text = "Streaming $streamInfo on port $streamPort. PC connected: ${if (clientConnected) "yes" else "no"}",
+                                    color = Color.Green
+                                )
+                            }
                             if (status.isNotEmpty()) {
                                 Text(text = status, color = Color.Yellow)
                             }
@@ -154,7 +162,7 @@ class MainActivity : ComponentActivity() {
                             ) {
                                 options.forEach { option ->
                                     Button(
-                                        enabled = !recording,
+                                        enabled = !streaming,
                                         onClick = { changeResolution(option.size) },
                                         contentPadding = PaddingValues(horizontal = 10.dp)
                                     ) {
@@ -163,13 +171,14 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                             Button(
-                                enabled = !recording,
-                                onClick = { startRecording() },
+                                onClick = {
+                                    if (streaming) stopStreaming() else startStreaming()
+                                },
                                 modifier = Modifier
                                     .padding(top = 8.dp)
                                     .fillMaxWidth()
                             ) {
-                                Text(if (recording) "Recording..." else "Record 10 seconds")
+                                Text(if (streaming) "Stop streaming" else "Start streaming")
                             }
                         }
                     } else {
@@ -191,9 +200,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onPause() {
         closeCamera()
-        recorder?.finish()
-        recorder = null
-        recording = false
+        streamer?.stop()
+        streamer = null
+        streaming = false
+        clientConnected = false
         stopThread()
         super.onPause()
     }
@@ -206,7 +216,6 @@ class MainActivity : ComponentActivity() {
         } ?: ids.first()
 
         val characteristics = cameraManager.getCameraCharacteristics(cameraId)
-        sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
         val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)!!
         val sizes = map.getOutputSizes(SurfaceTexture::class.java).toList()
         Log.d("OpenPhoneCam", "Camera sizes: " + sizes.joinToString { "${it.width}x${it.height}" })
@@ -255,7 +264,7 @@ class MainActivity : ComponentActivity() {
         Handler(Looper.getMainLooper()).postDelayed({ startCameraIfReady() }, 400)
     }
 
-    private fun startRecording() {
+    private fun startStreaming() {
         val option = options.firstOrNull { it.size == previewSize }
         if (option == null) {
             status = "No supported option selected"
@@ -268,47 +277,37 @@ class MainActivity : ComponentActivity() {
         val mime = if (option.h264) "video/avc" else "video/hevc"
         val bitrate = when {
             option.size.width >= 3840 -> 40_000_000
-            option.size.width >= 1920 -> 12_000_000
+            option.size.width >= 1920 -> 10_000_000
             else -> 6_000_000
         }
-        val dir = getExternalFilesDir(Environment.DIRECTORY_MOVIES)
-        if (dir == null) {
-            status = "No storage folder available"
-            return
-        }
-        val file = File(dir, "test_${option.label}.mp4")
 
         try {
-            val newRecorder = Recorder(file, option.size, mime, bitrate, 30, sensorOrientation)
-            newRecorder.prepare()
-            recorder = newRecorder
+            val newStreamer = Streamer(option.size, mime, bitrate, 30, streamPort) { connected ->
+                runOnUiThread { clientConnected = connected }
+            }
+            newStreamer.start()
+            streamer = newStreamer
         } catch (e: Exception) {
-            Log.e("OpenPhoneCam", "Recorder error: ${e.message}")
-            status = "Encoder error: ${e.message}"
+            Log.e("OpenPhoneCam", "Streamer error: ${e.message}")
+            status = "Encoder or port error: ${e.message}"
             return
         }
 
-        recordingFile = file
-        recording = true
-        status = "Recording ${option.label} (${if (option.h264) "H.264" else "HEVC"})"
+        streamInfo = "${option.label} ${if (option.h264) "H.264" else "HEVC"}"
+        streaming = true
+        status = ""
         closeCamera()
         Handler(Looper.getMainLooper()).postDelayed({ startCameraIfReady() }, 400)
-        Handler(Looper.getMainLooper()).postDelayed({ stopRecording() }, 10_500)
     }
 
-    private fun stopRecording() {
-        if (!recording) return
+    private fun stopStreaming() {
+        if (!streaming) return
         closeCamera()
-        recorder?.finish()
-        recorder = null
-        recording = false
-        val file = recordingFile
-        if (file != null && file.exists()) {
-            val megabytes = file.length() / 1024.0 / 1024.0
-            status = "Saved ${file.name} (${"%.1f".format(megabytes)} MB)"
-        } else {
-            status = "Recording failed"
-        }
+        streamer?.stop()
+        streamer = null
+        streaming = false
+        clientConnected = false
+        status = "Streaming stopped"
         Handler(Looper.getMainLooper()).postDelayed({ startCameraIfReady() }, 400)
     }
 
@@ -362,8 +361,8 @@ class MainActivity : ComponentActivity() {
     @Suppress("DEPRECATION")
     private fun startPreview(camera: CameraDevice, view: TextureView) {
         val texture = view.surfaceTexture ?: return
-        val activeRecorder = recorder
-        val bufferSize = if (activeRecorder != null && previewSize.width > 1920) {
+        val activeStreamer = streamer
+        val bufferSize = if (activeStreamer != null && previewSize.width > 1920) {
             Size(1280, 720)
         } else {
             previewSize
@@ -371,7 +370,7 @@ class MainActivity : ComponentActivity() {
         texture.setDefaultBufferSize(bufferSize.width, bufferSize.height)
         val previewSurface = Surface(texture)
 
-        val template = if (activeRecorder != null) {
+        val template = if (activeStreamer != null) {
             CameraDevice.TEMPLATE_RECORD
         } else {
             CameraDevice.TEMPLATE_PREVIEW
@@ -379,9 +378,9 @@ class MainActivity : ComponentActivity() {
         val requestBuilder = camera.createCaptureRequest(template)
         val surfaces = mutableListOf(previewSurface)
         requestBuilder.addTarget(previewSurface)
-        if (activeRecorder != null) {
-            surfaces.add(activeRecorder.inputSurface)
-            requestBuilder.addTarget(activeRecorder.inputSurface)
+        if (activeStreamer != null) {
+            surfaces.add(activeStreamer.inputSurface)
+            requestBuilder.addTarget(activeStreamer.inputSurface)
         }
         requestBuilder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
 
