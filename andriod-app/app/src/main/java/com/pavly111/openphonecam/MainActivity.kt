@@ -11,18 +11,29 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
+import android.media.MediaCodecList
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Looper
+import android.util.Log
 import android.util.Size
 import android.view.Surface
 import android.view.TextureView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
@@ -30,14 +41,24 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+
+data class ResolutionOption(
+    val label: String,
+    val size: Size,
+    val h264: Boolean,
+    val hevc: Boolean
+)
 
 class MainActivity : ComponentActivity() {
 
     private lateinit var cameraManager: CameraManager
     private lateinit var cameraId: String
-    private lateinit var previewSize: Size
+    private var previewSize by mutableStateOf(Size(1920, 1080))
+    private var options: List<ResolutionOption> = emptyList()
 
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
@@ -98,10 +119,38 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         )
-                        Text(
-                            text = "Preview ${previewSize.width}x${previewSize.height}",
-                            modifier = Modifier.align(Alignment.TopCenter)
-                        )
+                        Column(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .fillMaxWidth()
+                                .background(Color(0x99000000))
+                                .padding(12.dp)
+                        ) {
+                            val current = options.firstOrNull { it.size == previewSize }
+                            Text(
+                                text = "Preview ${previewSize.width}x${previewSize.height}",
+                                color = Color.White
+                            )
+                            if (current != null) {
+                                Text(
+                                    text = "H.264: ${if (current.h264) "yes" else "no"}   HEVC: ${if (current.hevc) "yes" else "no"}",
+                                    color = Color.White
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.padding(top = 8.dp),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                options.forEach { option ->
+                                    Button(
+                                        onClick = { changeResolution(option.size) },
+                                        contentPadding = PaddingValues(horizontal = 10.dp)
+                                    ) {
+                                        Text(option.label)
+                                    }
+                                }
+                            }
+                        }
                     } else {
                         Text(
                             text = "Camera permission is needed",
@@ -134,10 +183,50 @@ class MainActivity : ComponentActivity() {
 
         val map = cameraManager.getCameraCharacteristics(cameraId)
             .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)!!
-        val sizes = map.getOutputSizes(SurfaceTexture::class.java)
-        previewSize = sizes.firstOrNull { it.width == 1920 && it.height == 1080 }
+        val sizes = map.getOutputSizes(SurfaceTexture::class.java).toList()
+        Log.d("OpenPhoneCam", "Camera sizes: " + sizes.joinToString { "${it.width}x${it.height}" })
+
+        val targets = listOf(
+            "720p" to Size(1280, 720),
+            "1080p" to Size(1920, 1080),
+            "1440p" to Size(2560, 1440),
+            "4K" to Size(3840, 2160),
+            "8K" to Size(7680, 4320)
+        )
+        options = targets
+            .filter { (_, size) -> sizes.contains(size) }
+            .map { (label, size) ->
+                ResolutionOption(
+                    label,
+                    size,
+                    encoderSupports("video/avc", size),
+                    encoderSupports("video/hevc", size)
+                )
+            }
+        options.forEach {
+            Log.d("OpenPhoneCam", "${it.label}: H.264=${it.h264} HEVC=${it.hevc}")
+        }
+
+        previewSize = options.firstOrNull { it.label == "1080p" }?.size
             ?: sizes.filter { it.width * 9 == it.height * 16 }.maxByOrNull { it.width }
                     ?: sizes.first()
+    }
+
+    private fun encoderSupports(mime: String, size: Size): Boolean {
+        val infos = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
+        return infos.any { info ->
+            info.isEncoder &&
+                    info.supportedTypes.any { it.equals(mime, ignoreCase = true) } &&
+                    info.getCapabilitiesForType(mime).videoCapabilities
+                        ?.isSizeSupported(size.width, size.height) == true
+        }
+    }
+
+    private fun changeResolution(size: Size) {
+        if (size == previewSize) return
+        closeCamera()
+        previewSize = size
+        Handler(Looper.getMainLooper()).postDelayed({ startCameraIfReady() }, 400)
     }
 
     private fun startThread() {
