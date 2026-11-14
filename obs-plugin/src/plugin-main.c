@@ -5,6 +5,7 @@
 #include <plugin-support.h>
 
 #include <libavcodec/avcodec.h>
+#include <libavutil/error.h>
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -28,8 +29,11 @@ struct phonecam_source {
     pthread_t thread;
     bool thread_started;
     volatile bool stop;
-    bool frame_logged;
     bool format_warned;
+    uint64_t bytes;
+    uint64_t packets;
+    uint64_t frames;
+    uint64_t decode_errors;
 };
 
 static int connect_to_phone(void)
@@ -86,15 +90,22 @@ static void output_frame(struct phonecam_source *s, AVFrame *f)
                                            out.color_range_min, out.color_range_max);
     obs_source_output_video(s->source, &out);
 
-    if (!s->frame_logged) {
+    if (s->frames == 0) {
         obs_log(LOG_INFO, "first frame received: %dx%d", f->width, f->height);
-        s->frame_logged = true;
     }
+    s->frames++;
 }
 
 static void decode_packet(struct phonecam_source *s, AVCodecContext *ctx, AVPacket *pkt, AVFrame *frame)
 {
-    if (avcodec_send_packet(ctx, pkt) < 0) {
+    int ret = avcodec_send_packet(ctx, pkt);
+    if (ret < 0) {
+        if (s->decode_errors < 5) {
+            char err[128];
+            av_strerror(ret, err, sizeof(err));
+            obs_log(LOG_WARNING, "send_packet failed: %s", err);
+        }
+        s->decode_errors++;
         return;
     }
     while (avcodec_receive_frame(ctx, frame) == 0) {
@@ -105,7 +116,11 @@ static void decode_packet(struct phonecam_source *s, AVCodecContext *ctx, AVPack
 
 static void run_session(struct phonecam_source *s, int fd)
 {
-    s->frame_logged = false;
+    s->bytes = 0;
+    s->packets = 0;
+    s->frames = 0;
+    s->decode_errors = 0;
+    obs_log(LOG_INFO, "connected to phone on port %d", PHONE_PORT);
 
     const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_H264);
     if (!codec) {
@@ -136,14 +151,21 @@ static void run_session(struct phonecam_source *s, int fd)
     while (!os_atomic_load_bool(&s->stop)) {
         ssize_t n = recv(fd, buf, READ_SIZE, 0);
         if (n == 0) {
+            obs_log(LOG_INFO, "phone closed the connection");
             break;
         }
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
                 continue;
             }
+            obs_log(LOG_WARNING, "receive error %d", errno);
             break;
         }
+
+        if (s->bytes == 0) {
+            obs_log(LOG_INFO, "first data received: %zd bytes", n);
+        }
+        s->bytes += (uint64_t)n;
 
         memset(buf + n, 0, AV_INPUT_BUFFER_PADDING_SIZE);
         uint8_t *data = buf;
@@ -158,10 +180,18 @@ static void run_session(struct phonecam_source *s, int fd)
             data += used;
             size -= used;
             if (pkt->size > 0) {
+                if (s->packets == 0) {
+                    obs_log(LOG_INFO, "first packet parsed: %d bytes", pkt->size);
+                }
+                s->packets++;
                 decode_packet(s, ctx, pkt, frame);
             }
         }
     }
+
+    obs_log(LOG_INFO, "session ended: %llu bytes, %llu packets, %llu frames, %llu decode errors",
+            (unsigned long long)s->bytes, (unsigned long long)s->packets,
+            (unsigned long long)s->frames, (unsigned long long)s->decode_errors);
 
 cleanup:
     obs_source_output_video(s->source, NULL);
@@ -210,6 +240,7 @@ static void *phonecam_create(obs_data_t *settings, obs_source_t *source)
 
     if (pthread_create(&s->thread, NULL, phonecam_thread, s) == 0) {
         s->thread_started = true;
+        obs_log(LOG_INFO, "source created, waiting for the phone");
     } else {
         obs_log(LOG_ERROR, "could not start the receiver thread");
     }
