@@ -21,7 +21,11 @@
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
 
-#define PHONE_PORT 5000
+#define DEFAULT_PORT 5000
+#define SETTING_PORT "port"
+#define SETTING_LATENCY "latency_mode"
+#define LATENCY_LOWEST 0
+#define LATENCY_SMOOTH 1
 #define READ_SIZE 65536
 
 struct phonecam_source {
@@ -29,6 +33,7 @@ struct phonecam_source {
     pthread_t thread;
     bool thread_started;
     volatile bool stop;
+    volatile long port;
     bool format_warned;
     uint64_t bytes;
     uint64_t packets;
@@ -36,7 +41,7 @@ struct phonecam_source {
     uint64_t decode_errors;
 };
 
-static int connect_to_phone(void)
+static int connect_to_phone(int port)
 {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -46,7 +51,7 @@ static int connect_to_phone(void)
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(PHONE_PORT);
+    addr.sin_port = htons((uint16_t)port);
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
@@ -114,13 +119,13 @@ static void decode_packet(struct phonecam_source *s, AVCodecContext *ctx, AVPack
     }
 }
 
-static void run_session(struct phonecam_source *s, int fd)
+static void run_session(struct phonecam_source *s, int fd, int port)
 {
     s->bytes = 0;
     s->packets = 0;
     s->frames = 0;
     s->decode_errors = 0;
-    obs_log(LOG_INFO, "connected to phone on port %d", PHONE_PORT);
+    obs_log(LOG_INFO, "connected to phone on port %d", port);
 
     const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_H264);
     if (!codec) {
@@ -149,6 +154,11 @@ static void run_session(struct phonecam_source *s, int fd)
     }
 
     while (!os_atomic_load_bool(&s->stop)) {
+        if (os_atomic_load_long(&s->port) != (long)port) {
+            obs_log(LOG_INFO, "port changed, reconnecting");
+            break;
+        }
+
         ssize_t n = recv(fd, buf, READ_SIZE, 0);
         if (n == 0) {
             obs_log(LOG_INFO, "phone closed the connection");
@@ -211,12 +221,13 @@ static void *phonecam_thread(void *data)
     struct phonecam_source *s = data;
 
     while (!os_atomic_load_bool(&s->stop)) {
-        int fd = connect_to_phone();
+        int port = (int)os_atomic_load_long(&s->port);
+        int fd = connect_to_phone(port);
         if (fd < 0) {
             os_sleep_ms(500);
             continue;
         }
-        run_session(s, fd);
+        run_session(s, fd, port);
         close(fd);
         os_sleep_ms(300);
     }
@@ -229,14 +240,51 @@ static const char *phonecam_get_name(void *unused)
     return "OpenPhoneCam";
 }
 
+static void phonecam_defaults(obs_data_t *settings)
+{
+    obs_data_set_default_int(settings, SETTING_PORT, DEFAULT_PORT);
+    obs_data_set_default_int(settings, SETTING_LATENCY, LATENCY_LOWEST);
+}
+
+static obs_properties_t *phonecam_properties(void *data)
+{
+    UNUSED_PARAMETER(data);
+
+    obs_properties_t *props = obs_properties_create();
+    obs_properties_add_int(props, SETTING_PORT, "Port (computer side of adb forward)", 1024, 65535, 1);
+
+    obs_property_t *mode = obs_properties_add_list(props, SETTING_LATENCY, "Latency mode",
+                                                   OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(mode, "Lowest latency", LATENCY_LOWEST);
+    obs_property_list_add_int(mode, "Smooth (adds a small delay)", LATENCY_SMOOTH);
+    return props;
+}
+
+static void phonecam_update(void *data, obs_data_t *settings)
+{
+    struct phonecam_source *s = data;
+
+    long port = (long)obs_data_get_int(settings, SETTING_PORT);
+    if (port < 1024 || port > 65535) {
+        port = DEFAULT_PORT;
+    }
+    if (port != os_atomic_load_long(&s->port)) {
+        os_atomic_set_long(&s->port, port);
+        obs_log(LOG_INFO, "port set to %ld", port);
+    }
+
+    bool lowest = obs_data_get_int(settings, SETTING_LATENCY) == LATENCY_LOWEST;
+    obs_source_set_async_unbuffered(s->source, lowest);
+    obs_log(LOG_INFO, "latency mode: %s", lowest ? "lowest latency" : "smooth");
+}
+
 static void *phonecam_create(obs_data_t *settings, obs_source_t *source)
 {
-    UNUSED_PARAMETER(settings);
-
     struct phonecam_source *s = bzalloc(sizeof(struct phonecam_source));
     s->source = source;
-    obs_source_set_async_unbuffered(source, true);
     os_atomic_set_bool(&s->stop, false);
+    os_atomic_set_long(&s->port, DEFAULT_PORT);
+    phonecam_update(s, settings);
 
     if (pthread_create(&s->thread, NULL, phonecam_thread, s) == 0) {
         s->thread_started = true;
@@ -264,6 +312,9 @@ static struct obs_source_info phonecam_info = {
     .output_flags = OBS_SOURCE_ASYNC_VIDEO | OBS_SOURCE_DO_NOT_DUPLICATE,
     .icon_type = OBS_ICON_TYPE_CAMERA,
     .get_name = phonecam_get_name,
+    .get_defaults = phonecam_defaults,
+    .get_properties = phonecam_properties,
+    .update = phonecam_update,
     .create = phonecam_create,
     .destroy = phonecam_destroy,
 };
