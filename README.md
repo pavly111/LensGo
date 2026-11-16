@@ -18,6 +18,7 @@ A free, open-source tool that turns your Android phone into a low-latency camera
 - Low-latency encoder settings (no B-frames, constant bitrate, real-time priority)
 - Automatic `adb forward` over USB, no terminal command needed
 - Wi-Fi streaming by entering the phone's IP address
+- Frame rate selection (30/60 fps, shown only where the phone's camera supports it)
 - Open source (GPL)
 
 ## Requirements
@@ -49,6 +50,7 @@ For the lowest delay in OBS:
 
 - Set the source's **Latency mode** to **Lowest latency** (the default).
 - Use **720p** if you don't need 1080p; encoding and decoding smaller frames takes less time.
+- Select **60 fps** if the phone supports it (the button only appears when the camera can do it); otherwise 30 fps is used.
 - Keep the phone on the **5 GHz** Wi-Fi band and close to the router; Wi-Fi power-save and weak signal add jitter.
 - Keep the phone screen on (the app already does this) and avoid letting it sleep.
 

@@ -19,6 +19,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
 import android.util.Log
+import android.util.Range
 import android.util.Size
 import android.view.Surface
 import android.view.TextureView
@@ -64,8 +65,11 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var cameraManager: CameraManager
     private lateinit var cameraId: String
+    private var cameraCharacteristics: CameraCharacteristics? = null
     private var previewSize by mutableStateOf(Size(1920, 1080))
     private var options: List<ResolutionOption> = emptyList()
+    private var streamFps by mutableStateOf(30)
+    private var maxFps by mutableStateOf(30)
 
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
@@ -181,6 +185,20 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                             }
+                            Row(
+                                modifier = Modifier.padding(top = 6.dp),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                listOf(30, 60).filter { it <= maxFps }.forEach { fps ->
+                                    Button(
+                                        enabled = !streaming,
+                                        onClick = { streamFps = fps },
+                                        contentPadding = PaddingValues(horizontal = 10.dp)
+                                    ) {
+                                        Text("$fps fps")
+                                    }
+                                }
+                            }
                             Button(
                                 onClick = {
                                     if (streaming) stopStreaming() else startStreaming()
@@ -268,6 +286,7 @@ class MainActivity : ComponentActivity() {
         } ?: ids.first()
 
         val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+        cameraCharacteristics = characteristics
         val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)!!
         val sizes = map.getOutputSizes(SurfaceTexture::class.java).toList()
         Log.d("OpenPhoneCam", "Camera sizes: " + sizes.joinToString { "${it.width}x${it.height}" })
@@ -296,6 +315,11 @@ class MainActivity : ComponentActivity() {
         previewSize = options.firstOrNull { it.label == "1080p" }?.size
             ?: sizes.filter { it.width * 9 == it.height * 16 }.maxByOrNull { it.width }
                     ?: sizes.first()
+
+        maxFps = characteristics
+            .get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+            ?.maxOfOrNull { it.upper } ?: 30
+        Log.d("OpenPhoneCam", "Max camera fps: $maxFps")
     }
 
     private fun encoderSupports(mime: String, size: Size): Boolean {
@@ -306,6 +330,27 @@ class MainActivity : ComponentActivity() {
                     info.getCapabilitiesForType(mime).videoCapabilities
                         ?.isSizeSupported(size.width, size.height) == true
         }
+    }
+
+    private fun chooseFpsRange(fps: Int): Range<Int>? {
+        val ranges = cameraCharacteristics
+            ?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+            ?: return null
+        if (ranges.isEmpty()) return null
+        val max = ranges.maxOfOrNull { it.upper } ?: fps
+        val target = minOf(fps, max)
+        val exact = ranges.firstOrNull { it.lower == target && it.upper == target }
+        if (exact != null) return exact
+        val withUpper = ranges.filter { it.upper >= target }
+        return if (withUpper.isNotEmpty()) {
+            withUpper.maxByOrNull { it.lower }
+        } else {
+            ranges.maxByOrNull { it.upper }
+        }
+    }
+
+    private fun effectiveFps(): Int {
+        return minOf(streamFps, maxFps)
     }
 
     private fun changeResolution(size: Size) {
@@ -334,8 +379,9 @@ class MainActivity : ComponentActivity() {
             else -> 6_000_000
         }
 
+        val fps = effectiveFps()
         try {
-            val newStreamer = Streamer(option.size, mime, bitrate, 30, streamPort) { connected ->
+            val newStreamer = Streamer(option.size, mime, bitrate, fps, streamPort) { connected ->
                 runOnUiThread { clientConnected = connected }
             }
             newStreamer.start()
@@ -436,6 +482,11 @@ class MainActivity : ComponentActivity() {
             requestBuilder.addTarget(activeStreamer.inputSurface)
         }
         requestBuilder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+        val fpsRange = chooseFpsRange(streamFps)
+        if (fpsRange != null) {
+            requestBuilder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
+            Log.d("OpenPhoneCam", "Target fps ${effectiveFps()}, range $fpsRange")
+        }
 
         camera.createCaptureSession(
             surfaces,
