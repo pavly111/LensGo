@@ -414,14 +414,21 @@ class MainActivity : ComponentActivity() {
             status = "This phone cannot encode ${option.label}"
             return
         }
-        val mime = if (option.h264) "video/avc" else "video/hevc"
+        val useHevc = option.hevc && (!option.h264 || option.size.width >= 2560)
+        val mime = if (useHevc) "video/hevc" else if (option.h264) "video/avc" else "video/hevc"
         val bitrate = when {
-            option.size.width >= 3840 -> 40_000_000
-            option.size.width >= 1920 -> 10_000_000
-            else -> 6_000_000
+            option.size.width >= 7680 -> if (useHevc) 60_000_000 else 120_000_000
+            option.size.width >= 3840 -> if (useHevc) 25_000_000 else 40_000_000
+            option.size.width >= 2560 -> if (useHevc) 12_000_000 else 20_000_000
+            option.size.width >= 1920 -> if (useHevc) 6_000_000 else 10_000_000
+            else -> if (useHevc) 3_000_000 else 6_000_000
         }
 
         val fps = effectiveFps()
+        Log.d(
+            "OpenPhoneCam",
+            "Stream: ${option.size.width}x${option.size.height} mime=$mime bitrate=$bitrate fps=$fps"
+        )
         try {
             val newStreamer = Streamer(option.size, mime, bitrate, fps, streamPort) { connected ->
                 runOnUiThread { clientConnected = connected }
@@ -434,7 +441,7 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        streamInfo = "${option.label} ${if (option.h264) "H.264" else "HEVC"}"
+        streamInfo = "${option.label} ${if (mime == "video/hevc") "HEVC" else "H.264"}"
         streaming = true
         status = ""
         closeCamera()

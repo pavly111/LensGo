@@ -47,6 +47,13 @@ class Streamer(
         format.setInteger(MediaFormat.KEY_PRIORITY, 0)
         format.setInteger(MediaFormat.KEY_OPERATING_RATE, fps)
         format.setInteger("prepend-sps-pps-to-idr-frames", 1)
+        if (mime == "video/hevc") {
+            try {
+                format.setInteger("prepend-vps-sps-pps-to-idr-frames", 1)
+            } catch (e: Exception) {
+                Log.e("OpenPhoneCam", "HEVC prepend key error: ${e.message}")
+            }
+        }
 
         val codec = MediaCodec.createEncoderByType(mime)
         Log.d("OpenPhoneCam", "Encoder in use: ${codec.name}")
@@ -89,6 +96,29 @@ class Streamer(
         accept.start()
     }
 
+    private val hevcParamHeaders = setOf(0x40, 0x42, 0x44)
+
+    private fun hasParamSets(data: ByteArray, headers: Set<Int>): Boolean {
+        var i = 0
+        while (i + 3 < data.size) {
+            val b0 = data[i].toInt() and 0xFF
+            val b1 = data[i + 1].toInt() and 0xFF
+            val b2 = data[i + 2].toInt() and 0xFF
+            if (b0 == 0 && b1 == 0 && b2 == 1) {
+                if (headers.contains(data[i + 3].toInt() and 0xFF)) return true
+                i += 3
+            } else if (i + 4 < data.size && b0 == 0 && b1 == 0 && b2 == 0 &&
+                (data[i + 3].toInt() and 0xFF) == 1
+            ) {
+                if (headers.contains(data[i + 4].toInt() and 0xFF)) return true
+                i += 4
+            } else {
+                i++
+            }
+        }
+        return false
+    }
+
     private fun drainLoop(codec: MediaCodec) {
         val info = MediaCodec.BufferInfo()
         try {
@@ -103,6 +133,12 @@ class Streamer(
                         buffer.get(data)
                         val isConfig = (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
                         if (isConfig) {
+                            synchronized(lock) { config = data }
+                        } else if (
+                            mime == "video/hevc" &&
+                            synchronized(lock) { config == null } &&
+                            hasParamSets(data, hevcParamHeaders)
+                        ) {
                             synchronized(lock) { config = data }
                         }
                         send(data)

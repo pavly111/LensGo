@@ -317,7 +317,10 @@ static void run_session(struct phonecam_source *s, int fd, const char *host, int
     AVCodecParserContext *parser = NULL;
     bool codec_ready = false;
 
-    if (!pkt || !frame || !buf) {
+    uint8_t *detect_buf = bmalloc(READ_SIZE + AV_INPUT_BUFFER_PADDING_SIZE);
+    size_t detect_len = 0;
+
+    if (!pkt || !frame || !buf || !detect_buf) {
         obs_log(LOG_ERROR, "could not allocate decoder");
         goto cleanup;
     }
@@ -341,44 +344,47 @@ static void run_session(struct phonecam_source *s, int fd, const char *host, int
             break;
         }
 
-        if (s->bytes == 0) {
-            obs_log(LOG_INFO, "first data received: %zd bytes", n);
-        }
         s->bytes += (uint64_t)n;
 
         if (!codec_ready) {
-            enum AVCodecID codec_id = detect_codec(buf, (int)n);
-            if (codec_id == AV_CODEC_ID_NONE) {
-                codec_id = AV_CODEC_ID_H264;
-                obs_log(LOG_INFO, "codec not detected yet, assuming H.264");
+            if (detect_len + (size_t)n > READ_SIZE) {
+                size_t skip = detect_len + (size_t)n - READ_SIZE;
+                memmove(detect_buf, detect_buf + skip, READ_SIZE - skip);
+                detect_len -= skip;
             }
+            memcpy(detect_buf + detect_len, buf, (size_t)n);
+            detect_len += (size_t)n;
+            memset(detect_buf + detect_len, 0, AV_INPUT_BUFFER_PADDING_SIZE);
 
-            const AVCodec *codec = avcodec_find_decoder(codec_id);
-            if (!codec) {
-                obs_log(LOG_ERROR, "no decoder for codec %d", (int)codec_id);
-                break;
+            enum AVCodecID codec_id = detect_codec(detect_buf, (int)detect_len);
+            if (codec_id != AV_CODEC_ID_NONE) {
+                const AVCodec *codec = avcodec_find_decoder(codec_id);
+                if (!codec) {
+                    obs_log(LOG_ERROR, "no decoder for codec %d", (int)codec_id);
+                    break;
+                }
+
+                ctx = avcodec_alloc_context3(codec);
+                parser = av_parser_init(codec_id);
+                if (!ctx || !parser) {
+                    obs_log(LOG_ERROR, "could not allocate decoder");
+                    break;
+                }
+
+                ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
+                ctx->flags2 |= AV_CODEC_FLAG2_FAST;
+                ctx->thread_count = 1;
+
+                if (avcodec_open2(ctx, codec, NULL) < 0) {
+                    obs_log(LOG_ERROR, "could not open %s decoder",
+                            codec_id == AV_CODEC_ID_HEVC ? "HEVC" : "H.264");
+                    break;
+                }
+
+                codec_ready = true;
+                obs_log(LOG_INFO, "stream codec: %s (%zu bytes buffered)",
+                        codec_id == AV_CODEC_ID_HEVC ? "HEVC" : "H.264", detect_len);
             }
-
-            ctx = avcodec_alloc_context3(codec);
-            parser = av_parser_init(codec_id);
-            if (!ctx || !parser) {
-                obs_log(LOG_ERROR, "could not allocate decoder");
-                break;
-            }
-
-            ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
-            ctx->flags2 |= AV_CODEC_FLAG2_FAST;
-            ctx->thread_count = 1;
-
-            if (avcodec_open2(ctx, codec, NULL) < 0) {
-                obs_log(LOG_ERROR, "could not open %s decoder",
-                        codec_id == AV_CODEC_ID_HEVC ? "HEVC" : "H.264");
-                break;
-            }
-
-            codec_ready = true;
-            obs_log(LOG_INFO, "stream codec: %s",
-                    codec_id == AV_CODEC_ID_HEVC ? "HEVC" : "H.264");
         }
 
         memset(buf + n, 0, AV_INPUT_BUFFER_PADDING_SIZE);
@@ -394,11 +400,28 @@ static void run_session(struct phonecam_source *s, int fd, const char *host, int
             data += used;
             size -= used;
             if (pkt->size > 0) {
-                if (s->packets == 0) {
-                    obs_log(LOG_INFO, "first packet parsed: %d bytes", pkt->size);
-                }
                 s->packets++;
                 decode_packet(s, ctx, pkt, frame);
+            }
+        }
+
+        if (codec_ready && detect_len > 0) {
+            uint8_t *data = detect_buf;
+            int size = (int)detect_len;
+            detect_len = 0;
+            memset(data + size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+
+            while (size > 0) {
+                int used = av_parser_parse2(parser, ctx, &pkt->data, &pkt->size, data, size,
+                                            AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
+                if (used < 0) {
+                    break;
+                }
+                data += used;
+                size -= used;
+                if (pkt->size > 0) {
+                    decode_packet(s, ctx, pkt, frame);
+                }
             }
         }
     }
@@ -418,6 +441,7 @@ cleanup:
     av_packet_free(&pkt);
     av_frame_free(&frame);
     bfree(buf);
+    bfree(detect_buf);
 }
 
 static void *phonecam_thread(void *data)
