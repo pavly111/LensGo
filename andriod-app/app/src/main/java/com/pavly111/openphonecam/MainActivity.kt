@@ -11,6 +11,8 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
+import android.media.MediaCodec
+import android.media.MediaCodecInfo
 import android.media.MediaCodecList
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
@@ -28,6 +30,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -37,6 +40,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -69,6 +73,7 @@ class MainActivity : ComponentActivity() {
     private var previewSize by mutableStateOf(Size(1920, 1080))
     private var options: List<ResolutionOption> = emptyList()
     private var streamFps by mutableStateOf(30)
+    private var fpsOptions by mutableStateOf(listOf(30))
     private var maxFps by mutableStateOf(30)
 
     private var cameraDevice: CameraDevice? = null
@@ -172,7 +177,9 @@ class MainActivity : ComponentActivity() {
                                 Text(text = status, color = Color.Yellow)
                             }
                             Row(
-                                modifier = Modifier.padding(top = 8.dp),
+                                modifier = Modifier
+                                    .padding(top = 8.dp)
+                                    .horizontalScroll(rememberScrollState()),
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 options.forEach { option ->
@@ -186,10 +193,12 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                             Row(
-                                modifier = Modifier.padding(top = 6.dp),
+                                modifier = Modifier
+                                    .padding(top = 6.dp)
+                                    .horizontalScroll(rememberScrollState()),
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                listOf(30, 60).filter { it <= maxFps }.forEach { fps ->
+                                fpsOptions.forEach { fps ->
                                     Button(
                                         enabled = !streaming,
                                         onClick = { streamFps = fps },
@@ -291,44 +300,77 @@ class MainActivity : ComponentActivity() {
         val sizes = map.getOutputSizes(SurfaceTexture::class.java).toList()
         Log.d("OpenPhoneCam", "Camera sizes: " + sizes.joinToString { "${it.width}x${it.height}" })
 
-        val targets = listOf(
-            "720p" to Size(1280, 720),
-            "1080p" to Size(1920, 1080),
-            "1440p" to Size(2560, 1440),
-            "4K" to Size(3840, 2160),
-            "8K" to Size(7680, 4320)
-        )
-        options = targets
-            .filter { (_, size) -> sizes.contains(size) }
-            .map { (label, size) ->
+        val allSizes = sizes
+            .filter { it.width >= 640 && it.height >= 360 }
+            .distinct()
+            .sortedByDescending { it.width.toLong() * it.height }
+        options = allSizes
+            .map { size ->
                 ResolutionOption(
-                    label,
+                    labelFor(size),
                     size,
                     encoderSupports("video/avc", size),
                     encoderSupports("video/hevc", size)
                 )
             }
+            .filter { it.h264 || it.hevc }
         options.forEach {
             Log.d("OpenPhoneCam", "${it.label}: H.264=${it.h264} HEVC=${it.hevc}")
         }
+        if (options.isEmpty()) {
+            options = listOf(ResolutionOption("1080p", Size(1920, 1080), false, false))
+        }
 
-        previewSize = options.firstOrNull { it.label == "1080p" }?.size
-            ?: sizes.filter { it.width * 9 == it.height * 16 }.maxByOrNull { it.width }
-                    ?: sizes.first()
+        previewSize = options.firstOrNull { it.size == Size(1920, 1080) }?.size
+            ?: options.firstOrNull { it.size.width * 9 == it.size.height * 16 }?.size
+            ?: options.first().size
 
-        maxFps = characteristics
+        val ranges = characteristics
             .get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
-            ?.maxOfOrNull { it.upper } ?: 30
-        Log.d("OpenPhoneCam", "Max camera fps: $maxFps")
+        val uppers = ranges
+            ?.map { it.upper }
+            ?.filter { it >= 24 }
+            ?.distinct()
+            ?.sorted()
+            ?: emptyList()
+        fpsOptions = if (uppers.isNotEmpty()) uppers else listOf(30)
+        maxFps = fpsOptions.last()
+        if (streamFps !in fpsOptions) {
+            streamFps = fpsOptions.first()
+        }
+        Log.d("OpenPhoneCam", "FPS options: $fpsOptions")
+    }
+
+    private fun labelFor(size: Size): String {
+        return when (size) {
+            Size(640, 360) -> "360p"
+            Size(854, 480) -> "480p"
+            Size(1280, 720) -> "720p"
+            Size(1920, 1080) -> "1080p"
+            Size(2560, 1440) -> "1440p"
+            Size(2048, 1080) -> "2K"
+            Size(3840, 2160) -> "4K"
+            Size(4096, 2160) -> "DCI 4K"
+            Size(7680, 4320) -> "8K"
+            else -> "${size.width}x${size.height}"
+        }
+    }
+
+    private val encoderCache = mutableMapOf<String, List<MediaCodecInfo>>()
+
+    private fun encodersFor(mime: String): List<MediaCodecInfo> {
+        return encoderCache.getOrPut(mime) {
+            MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.filter { info ->
+                info.isEncoder &&
+                        info.supportedTypes.any { it.equals(mime, ignoreCase = true) }
+            }
+        }
     }
 
     private fun encoderSupports(mime: String, size: Size): Boolean {
-        val infos = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
-        return infos.any { info ->
-            info.isEncoder &&
-                    info.supportedTypes.any { it.equals(mime, ignoreCase = true) } &&
-                    info.getCapabilitiesForType(mime).videoCapabilities
-                        ?.isSizeSupported(size.width, size.height) == true
+        return encodersFor(mime).any { info ->
+            info.getCapabilitiesForType(mime).videoCapabilities
+                ?.isSizeSupported(size.width, size.height) == true
         }
     }
 

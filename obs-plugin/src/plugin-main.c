@@ -253,6 +253,55 @@ static void decode_packet(struct phonecam_source *s, AVCodecContext *ctx, AVPack
     }
 }
 
+static int find_start_code(const uint8_t *d, int n)
+{
+    for (int i = 0; i + 3 < n; i++) {
+        if (d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 1) {
+            return i;
+        }
+        if (i + 4 < n && d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 0 && d[i + 3] == 1) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static enum AVCodecID detect_codec(const uint8_t *d, int n)
+{
+    int sc = find_start_code(d, n);
+    if (sc < 0) {
+        return AV_CODEC_ID_NONE;
+    }
+
+    int p = sc;
+    if (p + 3 < n && d[p] == 0 && d[p + 1] == 0 && d[p + 2] == 0 && d[p + 3] == 1) {
+        p += 4;
+    } else {
+        p += 3;
+    }
+    if (p >= n) {
+        return AV_CODEC_ID_NONE;
+    }
+
+    uint8_t b = d[p];
+    int h264_type = b & 0x1F;
+    int hevc_type = (b >> 1) & 0x3F;
+
+    if (hevc_type >= 32 && hevc_type <= 34) {
+        return AV_CODEC_ID_HEVC;
+    }
+    if (h264_type == 7 || h264_type == 8 || h264_type == 5) {
+        return AV_CODEC_ID_H264;
+    }
+    if (hevc_type >= 16 && hevc_type <= 21) {
+        return AV_CODEC_ID_HEVC;
+    }
+    if (h264_type >= 1 && h264_type <= 23) {
+        return AV_CODEC_ID_H264;
+    }
+    return AV_CODEC_ID_NONE;
+}
+
 static void run_session(struct phonecam_source *s, int fd, const char *host, int port)
 {
     s->bytes = 0;
@@ -261,29 +310,15 @@ static void run_session(struct phonecam_source *s, int fd, const char *host, int
     s->decode_errors = 0;
     obs_log(LOG_INFO, "connected to %s:%d", host, port);
 
-    const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_H264);
-    if (!codec) {
-        obs_log(LOG_ERROR, "H.264 decoder not found");
-        return;
-    }
-
-    AVCodecContext *ctx = avcodec_alloc_context3(codec);
-    AVCodecParserContext *parser = av_parser_init(AV_CODEC_ID_H264);
     AVPacket *pkt = av_packet_alloc();
     AVFrame *frame = av_frame_alloc();
     uint8_t *buf = bmalloc(READ_SIZE + AV_INPUT_BUFFER_PADDING_SIZE);
+    AVCodecContext *ctx = NULL;
+    AVCodecParserContext *parser = NULL;
+    bool codec_ready = false;
 
-    if (!ctx || !parser || !pkt || !frame || !buf) {
+    if (!pkt || !frame || !buf) {
         obs_log(LOG_ERROR, "could not allocate decoder");
-        goto cleanup;
-    }
-
-    ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
-    ctx->flags2 |= AV_CODEC_FLAG2_FAST;
-    ctx->thread_count = 1;
-
-    if (avcodec_open2(ctx, codec, NULL) < 0) {
-        obs_log(LOG_ERROR, "could not open H.264 decoder");
         goto cleanup;
     }
 
@@ -310,6 +345,41 @@ static void run_session(struct phonecam_source *s, int fd, const char *host, int
             obs_log(LOG_INFO, "first data received: %zd bytes", n);
         }
         s->bytes += (uint64_t)n;
+
+        if (!codec_ready) {
+            enum AVCodecID codec_id = detect_codec(buf, (int)n);
+            if (codec_id == AV_CODEC_ID_NONE) {
+                codec_id = AV_CODEC_ID_H264;
+                obs_log(LOG_INFO, "codec not detected yet, assuming H.264");
+            }
+
+            const AVCodec *codec = avcodec_find_decoder(codec_id);
+            if (!codec) {
+                obs_log(LOG_ERROR, "no decoder for codec %d", (int)codec_id);
+                break;
+            }
+
+            ctx = avcodec_alloc_context3(codec);
+            parser = av_parser_init(codec_id);
+            if (!ctx || !parser) {
+                obs_log(LOG_ERROR, "could not allocate decoder");
+                break;
+            }
+
+            ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
+            ctx->flags2 |= AV_CODEC_FLAG2_FAST;
+            ctx->thread_count = 1;
+
+            if (avcodec_open2(ctx, codec, NULL) < 0) {
+                obs_log(LOG_ERROR, "could not open %s decoder",
+                        codec_id == AV_CODEC_ID_HEVC ? "HEVC" : "H.264");
+                break;
+            }
+
+            codec_ready = true;
+            obs_log(LOG_INFO, "stream codec: %s",
+                    codec_id == AV_CODEC_ID_HEVC ? "HEVC" : "H.264");
+        }
 
         memset(buf + n, 0, AV_INPUT_BUFFER_PADDING_SIZE);
         uint8_t *data = buf;

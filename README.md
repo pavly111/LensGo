@@ -14,11 +14,12 @@ A free, open-source tool that turns your Android phone into a low-latency camera
 
 ## Features
 
-- Free at every resolution the phone supports (720p, 1080p, 1440p, 4K, 8K are shown only if the phone and its encoder support them)
+- All streamable resolutions the phone reports (720p, 1080p, 1440p, 2K, 4K, 8K where supported; non-standard sizes are listed by their dimensions)
+- H.264 and HEVC decoding, auto-detected from the stream
 - Low-latency encoder settings (no B-frames, constant bitrate, real-time priority)
 - Automatic `adb forward` over USB, no terminal command needed
 - Wi-Fi streaming by entering the phone's IP address
-- Frame rate selection (30/60 fps, shown only where the phone's camera supports it)
+- Frame rate selection (only the rates the phone's camera supports are shown)
 - Open source (GPL)
 
 ## Requirements
@@ -92,9 +93,9 @@ Restart OBS, then check **Help > Log Files > View Current Log** for lines starti
 - [x] Settings inside OBS (port, resolution, latency mode)
 - [x] Automatic adb port forwarding
 - [x] Wi-Fi connection
+- [x] HEVC option for 4K and above
 - [ ] Phone-side video stabilization
 - [ ] Windows build of the plugin
-- [ ] HEVC option for 4K and above
 - [ ] iPhone app
 - [ ] Prebuilt downloads
 
@@ -102,7 +103,7 @@ Restart OBS, then check **Help > Log Files > View Current Log** for lines starti
 
 - The OBS plugin currently builds only for macOS.
 - The phone app currently has to be built from source.
-- Only H.264 is decoded by the plugin.
+- The plugin decodes H.264 and HEVC (auto-detected); other codecs are not supported.
 - USB auto-forward relies on `adb` from Android platform-tools being installed and the phone being authorized for USB debugging.
 - Latency has not been measured accurately yet.
 
