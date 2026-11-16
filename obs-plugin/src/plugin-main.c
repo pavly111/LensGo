@@ -9,24 +9,40 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <spawn.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
+
+extern char **environ;
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
 
 #define DEFAULT_PORT 5000
 #define SETTING_PORT "port"
+#define SETTING_MODE "connection_mode"
+#define SETTING_ADDRESS "address"
+#define SETTING_ADB "adb_path"
 #define SETTING_LATENCY "latency_mode"
+
+#define CONNECTION_USB 0
+#define CONNECTION_WIFI 1
+
 #define LATENCY_LOWEST 0
 #define LATENCY_SMOOTH 1
+
 #define READ_SIZE 65536
+#define FORWARD_RETRY_NS 2000000000ULL
 
 struct phonecam_source {
     obs_source_t *source;
@@ -34,6 +50,15 @@ struct phonecam_source {
     bool thread_started;
     volatile bool stop;
     volatile long port;
+    volatile long mode;
+    pthread_mutex_t lock;
+    char address[128];
+    char adb_path[1024];
+    uint64_t last_forward_ns;
+    uint64_t last_connect_log_ns;
+    bool forward_ready_logged;
+    bool forward_failed_logged;
+    bool warned_no_address;
     bool format_warned;
     uint64_t bytes;
     uint64_t packets;
@@ -41,23 +66,132 @@ struct phonecam_source {
     uint64_t decode_errors;
 };
 
-static int connect_to_phone(int port)
+static bool file_is_executable(const char *path)
 {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    return path != NULL && path[0] != '\0' && access(path, X_OK) == 0;
+}
+
+static const char *find_adb(const char *override)
+{
+    static char path[1024];
+
+    if (file_is_executable(override)) {
+        return override;
+    }
+
+    const char *sdk = getenv("ANDROID_HOME");
+    if (!sdk || !sdk[0]) {
+        sdk = getenv("ANDROID_SDK_ROOT");
+    }
+    if (sdk && sdk[0]) {
+        snprintf(path, sizeof(path), "%s/platform-tools/adb", sdk);
+        if (file_is_executable(path)) {
+            return path;
+        }
+    }
+
+    const char *home = getenv("HOME");
+    if (home && home[0]) {
+        snprintf(path, sizeof(path), "%s/Library/Android/sdk/platform-tools/adb", home);
+        if (file_is_executable(path)) {
+            return path;
+        }
+        snprintf(path, sizeof(path), "%s/Android/Sdk/platform-tools/adb", home);
+        if (file_is_executable(path)) {
+            return path;
+        }
+    }
+
+    static const char *fixed[] = {
+        "/opt/homebrew/bin/adb",
+        "/usr/local/bin/adb",
+        "/usr/bin/adb",
+        "/bin/adb",
+    };
+    for (size_t i = 0; i < sizeof(fixed) / sizeof(fixed[0]); i++) {
+        if (file_is_executable(fixed[i])) {
+            snprintf(path, sizeof(path), "%s", fixed[i]);
+            return path;
+        }
+    }
+
+    return NULL;
+}
+
+static bool run_adb_forward(const char *override, int port)
+{
+    const char *adb = find_adb(override);
+    const char *exe = adb ? adb : "adb";
+
+    char forward[32];
+    snprintf(forward, sizeof(forward), "tcp:%d", port);
+
+    char *argv[8];
+    int i = 0;
+    argv[i++] = (char *)exe;
+    argv[i++] = (char *)"forward";
+    argv[i++] = forward;
+    argv[i++] = forward;
+    argv[i] = NULL;
+
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+    posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+
+    pid_t pid = 0;
+    int rc = posix_spawnp(&pid, exe, &actions, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&actions);
+
+    if (rc != 0) {
+        return false;
+    }
+
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) {
+        /* The host may reap children itself (SIGCHLD ignored); treat as spawned. */
+        return errno == ECHILD;
+    }
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static int connect_to_address(const char *host, int port)
+{
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%d", port);
+
+    struct addrinfo *res = NULL;
+    if (getaddrinfo(host, port_str, &hints, &res) != 0 || res == NULL) {
+        return -1;
+    }
+
+    int fd = -1;
+    for (struct addrinfo *ai = res; ai != NULL; ai = ai->ai_next) {
+        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd < 0) {
+            continue;
+        }
+        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
+            break;
+        }
+        close(fd);
+        fd = -1;
+    }
+    freeaddrinfo(res);
+
     if (fd < 0) {
         return -1;
     }
 
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons((uint16_t)port);
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        close(fd);
-        return -1;
-    }
+    int rcvbuf = 262144;
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+    int one = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
     struct timeval tv;
     tv.tv_sec = 1;
@@ -119,13 +253,13 @@ static void decode_packet(struct phonecam_source *s, AVCodecContext *ctx, AVPack
     }
 }
 
-static void run_session(struct phonecam_source *s, int fd, int port)
+static void run_session(struct phonecam_source *s, int fd, const char *host, int port)
 {
     s->bytes = 0;
     s->packets = 0;
     s->frames = 0;
     s->decode_errors = 0;
-    obs_log(LOG_INFO, "connected to phone on port %d", port);
+    obs_log(LOG_INFO, "connected to %s:%d", host, port);
 
     const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_H264);
     if (!codec) {
@@ -222,12 +356,61 @@ static void *phonecam_thread(void *data)
 
     while (!os_atomic_load_bool(&s->stop)) {
         int port = (int)os_atomic_load_long(&s->port);
-        int fd = connect_to_phone(port);
+        int mode = (int)os_atomic_load_long(&s->mode);
+
+        char host[128];
+        char adb_path[1024];
+        pthread_mutex_lock(&s->lock);
+        snprintf(host, sizeof(host), "%s", s->address);
+        snprintf(adb_path, sizeof(adb_path), "%s", s->adb_path);
+        pthread_mutex_unlock(&s->lock);
+
+        if (mode == CONNECTION_USB) {
+            snprintf(host, sizeof(host), "%s", "127.0.0.1");
+            uint64_t now = os_gettime_ns();
+            if (s->last_forward_ns == 0 || now - s->last_forward_ns > FORWARD_RETRY_NS) {
+                s->last_forward_ns = now;
+                bool ok = run_adb_forward(adb_path, port);
+                if (ok) {
+                    if (!s->forward_ready_logged) {
+                        obs_log(LOG_INFO, "adb forward ready for port %d", port);
+                        s->forward_ready_logged = true;
+                    }
+                    s->forward_failed_logged = false;
+                } else {
+                    if (!s->forward_failed_logged) {
+                        obs_log(LOG_WARNING, "auto adb forward failed: install platform-tools, "
+                                             "connect the phone, and authorize USB debugging");
+                        s->forward_failed_logged = true;
+                    }
+                    s->forward_ready_logged = false;
+                }
+            }
+        } else if (host[0] == '\0') {
+            if (!s->warned_no_address) {
+                obs_log(LOG_WARNING, "Wi-Fi mode is selected but no phone IP address is set");
+                s->warned_no_address = true;
+            }
+            os_sleep_ms(500);
+            continue;
+        } else {
+            s->warned_no_address = false;
+        }
+
+        int fd = connect_to_address(host, port);
         if (fd < 0) {
+            uint64_t now = os_gettime_ns();
+            if (s->last_connect_log_ns == 0 || now - s->last_connect_log_ns > 5000000000ULL) {
+                s->last_connect_log_ns = now;
+                obs_log(LOG_INFO, "waiting for phone at %s:%d (%s)", host, port,
+                        mode == CONNECTION_USB ? "usb" : "wifi");
+            }
             os_sleep_ms(500);
             continue;
         }
-        run_session(s, fd, port);
+        s->last_connect_log_ns = 0;
+
+        run_session(s, fd, host, port);
         close(fd);
         os_sleep_ms(300);
     }
@@ -243,20 +426,62 @@ static const char *phonecam_get_name(void *unused)
 static void phonecam_defaults(obs_data_t *settings)
 {
     obs_data_set_default_int(settings, SETTING_PORT, DEFAULT_PORT);
+    obs_data_set_default_int(settings, SETTING_MODE, CONNECTION_USB);
+    obs_data_set_default_string(settings, SETTING_ADDRESS, "");
+    obs_data_set_default_string(settings, SETTING_ADB, "");
     obs_data_set_default_int(settings, SETTING_LATENCY, LATENCY_LOWEST);
+}
+
+static bool phonecam_mode_modified(obs_properties_t *props, obs_property_t *p, obs_data_t *settings)
+{
+    UNUSED_PARAMETER(p);
+
+    long mode = obs_data_get_int(settings, SETTING_MODE);
+    bool usb = mode == CONNECTION_USB;
+
+    obs_property_t *address = obs_properties_get(props, SETTING_ADDRESS);
+    obs_property_t *adb = obs_properties_get(props, SETTING_ADB);
+    if (address) {
+        obs_property_set_visible(address, !usb);
+    }
+    if (adb) {
+        obs_property_set_visible(adb, usb);
+    }
+    return false;
 }
 
 static obs_properties_t *phonecam_properties(void *data)
 {
-    UNUSED_PARAMETER(data);
+    struct phonecam_source *s = data;
+    long current_mode = s ? (long)os_atomic_load_long(&s->mode) : CONNECTION_USB;
 
     obs_properties_t *props = obs_properties_create();
-    obs_properties_add_int(props, SETTING_PORT, "Port (computer side of adb forward)", 1024, 65535, 1);
 
-    obs_property_t *mode = obs_properties_add_list(props, SETTING_LATENCY, "Latency mode",
+    obs_property_t *mode = obs_properties_add_list(props, SETTING_MODE, "Connection",
                                                    OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-    obs_property_list_add_int(mode, "Lowest latency", LATENCY_LOWEST);
-    obs_property_list_add_int(mode, "Smooth (adds a small delay)", LATENCY_SMOOTH);
+    obs_property_list_add_int(mode, "USB (automatic adb forward)", CONNECTION_USB);
+    obs_property_list_add_int(mode, "Wi-Fi (phone IP address)", CONNECTION_WIFI);
+
+    obs_property_t *address =
+        obs_properties_add_text(props, SETTING_ADDRESS, "Phone IP address (Wi-Fi)",
+                                OBS_TEXT_DEFAULT);
+    obs_properties_add_int(props, SETTING_PORT, "Port", 1024, 65535, 1);
+    obs_property_t *adb =
+        obs_properties_add_text(props, SETTING_ADB, "adb path (optional)", OBS_TEXT_DEFAULT);
+
+    bool usb = current_mode == CONNECTION_USB;
+    if (address) {
+        obs_property_set_visible(address, !usb);
+    }
+    if (adb) {
+        obs_property_set_visible(adb, usb);
+    }
+    obs_property_set_modified_callback(mode, phonecam_mode_modified);
+
+    obs_property_t *latency = obs_properties_add_list(props, SETTING_LATENCY, "Latency mode",
+                                                      OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(latency, "Lowest latency", LATENCY_LOWEST);
+    obs_property_list_add_int(latency, "Smooth (adds a small delay)", LATENCY_SMOOTH);
     return props;
 }
 
@@ -270,12 +495,30 @@ static void phonecam_update(void *data, obs_data_t *settings)
     }
     if (port != os_atomic_load_long(&s->port)) {
         os_atomic_set_long(&s->port, port);
+        s->last_forward_ns = 0;
         obs_log(LOG_INFO, "port set to %ld", port);
     }
 
+    long mode = (long)obs_data_get_int(settings, SETTING_MODE);
+    if (mode != CONNECTION_USB && mode != CONNECTION_WIFI) {
+        mode = CONNECTION_USB;
+    }
+    if (mode != os_atomic_load_long(&s->mode)) {
+        os_atomic_set_long(&s->mode, mode);
+        s->last_forward_ns = 0;
+        obs_log(LOG_INFO, "connection mode: %s", mode == CONNECTION_USB ? "USB" : "Wi-Fi");
+    }
+
+    const char *address = obs_data_get_string(settings, SETTING_ADDRESS);
+    const char *adb_path = obs_data_get_string(settings, SETTING_ADB);
+
+    pthread_mutex_lock(&s->lock);
+    snprintf(s->address, sizeof(s->address), "%s", address ? address : "");
+    snprintf(s->adb_path, sizeof(s->adb_path), "%s", adb_path ? adb_path : "");
+    pthread_mutex_unlock(&s->lock);
+
     bool lowest = obs_data_get_int(settings, SETTING_LATENCY) == LATENCY_LOWEST;
     obs_source_set_async_unbuffered(s->source, lowest);
-    obs_log(LOG_INFO, "latency mode: %s", lowest ? "lowest latency" : "smooth");
 }
 
 static void *phonecam_create(obs_data_t *settings, obs_source_t *source)
@@ -284,6 +527,8 @@ static void *phonecam_create(obs_data_t *settings, obs_source_t *source)
     s->source = source;
     os_atomic_set_bool(&s->stop, false);
     os_atomic_set_long(&s->port, DEFAULT_PORT);
+    os_atomic_set_long(&s->mode, CONNECTION_USB);
+    pthread_mutex_init(&s->lock, NULL);
     phonecam_update(s, settings);
 
     if (pthread_create(&s->thread, NULL, phonecam_thread, s) == 0) {
@@ -303,6 +548,7 @@ static void phonecam_destroy(void *data)
     if (s->thread_started) {
         pthread_join(s->thread, NULL);
     }
+    pthread_mutex_destroy(&s->lock);
     bfree(s);
 }
 

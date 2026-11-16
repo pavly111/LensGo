@@ -7,16 +7,17 @@ A free, open-source tool that turns your Android phone into a low-latency camera
 ## How it works
 
     Phone camera -> hardware H.264 encoder -> TCP server on port 5000
-        -> adb forward over USB -> OBS plugin (FFmpeg decoder) -> "OpenPhoneCam" source in OBS
+        -> adb forward (set up automatically by the plugin) -> OBS plugin (FFmpeg decoder) -> "OpenPhoneCam" source in OBS
 
 - `android-app/` is the phone app (Kotlin). It captures the camera, encodes it with the phone's hardware encoder, and serves the stream on port 5000.
-- `obs-plugin/` is the OBS Studio plugin (C). It connects to the stream, decodes it, and shows it as a video source.
+- `obs-plugin/` is the OBS Studio plugin (C). It sets up `adb forward` for you (or connects over Wi-Fi), decodes the stream, and shows it as a video source.
 
 ## Features
 
 - Free at every resolution the phone supports (720p, 1080p, 1440p, 4K, 8K are shown only if the phone and its encoder support them)
 - Low-latency encoder settings (no B-frames, constant bitrate, real-time priority)
-- USB connection through adb
+- Automatic `adb forward` over USB, no terminal command needed
+- Wi-Fi streaming by entering the phone's IP address
 - Open source (GPL)
 
 ## Requirements
@@ -32,14 +33,26 @@ A free, open-source tool that turns your Android phone into a low-latency camera
 1. Build and install the phone app (see "Building from source").
 2. Connect the phone to your computer with the USB cable and allow USB debugging.
 3. Open the OpenPhoneCam app, choose a resolution, and tap **Start streaming**.
-4. On your computer run:
+4. In OBS, add a source with **Sources > + > OpenPhoneCam**. Leave **Connection** on **USB** and the plugin runs `adb forward tcp:5000 tcp:5000` for you.
 
-        adb forward tcp:5000 tcp:5000
+   To stream over Wi-Fi instead, make sure the phone and computer are on the same network, set **Connection** to **Wi-Fi**, and enter the phone's IP address shown in the app (for example `192.168.1.20`).
 
-   With Android Studio on macOS, adb is at `~/Library/Android/sdk/platform-tools/adb`.
-5. Install the OBS plugin (see below), open OBS, and add a source with **Sources > + > OpenPhoneCam**.
+   With Android Studio on macOS, adb is usually at `~/Library/Android/sdk/platform-tools/adb`. The plugin finds it automatically; you can set **adb path** in the source if needed.
 
-The plugin reconnects by itself, so you can start the app, run the adb command, or open OBS in any order.
+The plugin reconnects by itself, so you can start the app, open OBS, or connect the phone in any order.
+
+## Reducing latency
+
+The stream is tuned for low latency out of the box: CBR, no B-frames, realtime encoder priority, a 1-second keyframe interval (plus a keyframe requested on connect), and small TCP buffers with Nagle disabled on both ends.
+
+For the lowest delay in OBS:
+
+- Set the source's **Latency mode** to **Lowest latency** (the default).
+- Use **720p** if you don't need 1080p; encoding and decoding smaller frames takes less time.
+- Keep the phone on the **5 GHz** Wi-Fi band and close to the router; Wi-Fi power-save and weak signal add jitter.
+- Keep the phone screen on (the app already does this) and avoid letting it sleep.
+
+USB is still slightly more consistent than Wi-Fi because it has no wireless retransmits. Wi-Fi is convenient but subject to network conditions.
 
 ## Building from source
 
@@ -74,10 +87,11 @@ Restart OBS, then check **Help > Log Files > View Current Log** for lines starti
 - [x] Camera preview and resolution detection
 - [x] Hardware H.264 encoding and USB streaming
 - [x] OBS plugin for macOS
-- [ ] Settings inside OBS (port, resolution, latency mode)
+- [x] Settings inside OBS (port, resolution, latency mode)
+- [x] Automatic adb port forwarding
+- [x] Wi-Fi connection
 - [ ] Phone-side video stabilization
 - [ ] Windows build of the plugin
-- [ ] Wi-Fi connection
 - [ ] HEVC option for 4K and above
 - [ ] iPhone app
 - [ ] Prebuilt downloads
@@ -87,6 +101,7 @@ Restart OBS, then check **Help > Log Files > View Current Log** for lines starti
 - The OBS plugin currently builds only for macOS.
 - The phone app currently has to be built from source.
 - Only H.264 is decoded by the plugin.
+- USB auto-forward relies on `adb` from Android platform-tools being installed and the phone being authorized for USB debugging.
 - Latency has not been measured accurately yet.
 
 ## License

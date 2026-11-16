@@ -12,6 +12,8 @@ import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.media.MediaCodecList
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
@@ -46,6 +48,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import java.net.Inet4Address
+import java.net.NetworkInterface
 
 data class ResolutionOption(
     val label: String,
@@ -76,6 +80,7 @@ class MainActivity : ComponentActivity() {
     private var streamInfo by mutableStateOf("")
     private var clientConnected by mutableStateOf(false)
     private var status by mutableStateOf("")
+    private var deviceIp by mutableStateOf<String?>(null)
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -153,6 +158,12 @@ class MainActivity : ComponentActivity() {
                                     color = Color.Green
                                 )
                             }
+                            deviceIp?.let { ip ->
+                                Text(
+                                    text = "Wi-Fi: $ip:$streamPort (use this IP in OBS)",
+                                    color = Color.White
+                                )
+                            }
                             if (status.isNotEmpty()) {
                                 Text(text = status, color = Color.Yellow)
                             }
@@ -194,6 +205,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        deviceIp = localIpv4()
         startThread()
         startCameraIfReady()
     }
@@ -206,6 +218,46 @@ class MainActivity : ComponentActivity() {
         clientConnected = false
         stopThread()
         super.onPause()
+    }
+
+    private fun localIpv4(): String? {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        if (cm != null) {
+            val networks = try {
+                cm.allNetworks.toList()
+            } catch (e: Exception) {
+                emptyList()
+            }
+            val wifi = networks.firstOrNull { net ->
+                cm.getNetworkCapabilities(net)
+                    ?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+            } ?: cm.activeNetwork
+            val props = wifi?.let { net ->
+                try {
+                    cm.getLinkProperties(net)
+                } catch (e: Exception) {
+                    null
+                }
+            }
+            val address = props?.linkAddresses
+                ?.map { it.address }
+                ?.filterIsInstance<Inet4Address>()
+                ?.firstOrNull { !it.isLoopbackAddress }
+                ?.hostAddress
+            if (address != null) return address
+        }
+        return try {
+            NetworkInterface.getNetworkInterfaces().toList()
+                .filter { it.isUp && !it.isLoopback }
+                .sortedByDescending { it.name.startsWith("wlan", ignoreCase = true) }
+                .flatMap { it.inetAddresses.toList() }
+                .filterIsInstance<Inet4Address>()
+                .firstOrNull { !it.isLoopbackAddress }
+                ?.hostAddress
+        } catch (e: Exception) {
+            Log.e("OpenPhoneCam", "IP lookup error: ${e.message}")
+            null
+        }
     }
 
     private fun pickCamera() {
@@ -265,6 +317,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startStreaming() {
+        deviceIp = localIpv4()
         val option = options.firstOrNull { it.size == previewSize }
         if (option == null) {
             status = "No supported option selected"

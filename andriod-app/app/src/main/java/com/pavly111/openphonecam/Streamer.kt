@@ -121,6 +121,11 @@ class Streamer(
             try {
                 val socket = server.accept()
                 socket.tcpNoDelay = true
+                try {
+                    socket.sendBufferSize = 64 * 1024
+                } catch (e: Exception) {
+                    Log.e("OpenPhoneCam", "Send buffer error: ${e.message}")
+                }
                 var connected = false
                 synchronized(lock) {
                     if (client != null) dropClient()
