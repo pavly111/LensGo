@@ -30,29 +30,48 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.material3.Button
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import com.pavly111.openphonecam.ui.theme.BackgroundGradient
+import com.pavly111.openphonecam.ui.theme.NeonCyan
+import com.pavly111.openphonecam.ui.theme.NeonMint
+import com.pavly111.openphonecam.ui.theme.NeonPink
+import com.pavly111.openphonecam.ui.theme.NeonViolet
+import com.pavly111.openphonecam.ui.theme.OpenPhoneCamTheme
+import com.pavly111.openphonecam.ui.theme.TextMuted
+import com.pavly111.openphonecam.ui.theme.TextPrimary
 import java.net.Inet4Address
 import java.net.NetworkInterface
 
@@ -63,6 +82,23 @@ data class ResolutionOption(
     val hevc: Boolean
 )
 
+data class QualityOption(
+    val label: String,
+    val size: Size,
+    val h264: Boolean,
+    val hevc: Boolean
+) {
+    val codec: String
+        get() = when {
+            h264 && hevc -> "H.264 / HEVC"
+            h264 -> "H.264"
+            hevc -> "HEVC"
+            else -> "—"
+        }
+}
+
+private val TIER_ORDER = listOf("480p", "720p", "1080p", "2K", "4K", "8K")
+
 class MainActivity : ComponentActivity() {
 
     private val streamPort = 5000
@@ -72,6 +108,7 @@ class MainActivity : ComponentActivity() {
     private var cameraCharacteristics: CameraCharacteristics? = null
     private var previewSize by mutableStateOf(Size(1920, 1080))
     private var options: List<ResolutionOption> = emptyList()
+    private var qualityOptions: List<QualityOption> = emptyList()
     private var streamFps by mutableStateOf(30)
     private var fpsOptions by mutableStateOf(listOf(30))
     private var maxFps by mutableStateOf(30)
@@ -111,122 +148,397 @@ class MainActivity : ComponentActivity() {
         }
 
         setContent {
-            MaterialTheme {
-                Box(modifier = Modifier.fillMaxSize()) {
-                    if (permissionGranted) {
-                        AndroidView(
-                            modifier = Modifier
-                                .align(Alignment.Center)
-                                .aspectRatio(previewSize.height.toFloat() / previewSize.width.toFloat()),
-                            factory = { ctx ->
-                                TextureView(ctx).also { view ->
-                                    textureView = view
-                                    view.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                                        override fun onSurfaceTextureAvailable(
-                                            surface: SurfaceTexture, width: Int, height: Int
-                                        ) {
-                                            startCameraIfReady()
-                                        }
+            OpenPhoneCamTheme {
+                OpenPhoneCamScreen()
+            }
+        }
+    }
 
-                                        override fun onSurfaceTextureSizeChanged(
-                                            surface: SurfaceTexture, width: Int, height: Int
-                                        ) {
-                                        }
+    @Composable
+    private fun OpenPhoneCamScreen() {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(BackgroundGradient)
+        ) {
+            if (!permissionGranted) {
+                PermissionNeeded()
+                return@Box
+            }
 
-                                        override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
-                                            return true
-                                        }
+            Column(modifier = Modifier.fillMaxSize()) {
+                PreviewArea(modifier = Modifier.weight(1f))
+                ControlPanel()
+            }
+        }
+    }
 
-                                        override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
-                                        }
-                                    }
+    @Composable
+    private fun PreviewArea(modifier: Modifier = Modifier) {
+        Box(
+            modifier = modifier
+                .fillMaxWidth(),
+            contentAlignment = Alignment.Center
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(previewSize.height.toFloat() / previewSize.width.toFloat())
+                    .clip(RoundedCornerShape(26.dp))
+                    .background(Color.Black)
+                    .border(1.dp, NeonCyan.copy(alpha = 0.28f), RoundedCornerShape(26.dp))
+            ) {
+                AndroidView(
+                    modifier = Modifier.fillMaxSize(),
+                    factory = { ctx ->
+                        TextureView(ctx).also { view ->
+                            textureView = view
+                            view.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                                override fun onSurfaceTextureAvailable(
+                                    surface: SurfaceTexture, width: Int, height: Int
+                                ) {
+                                    startCameraIfReady()
                                 }
-                            }
-                        )
-                        Column(
-                            modifier = Modifier
-                                .align(Alignment.BottomCenter)
-                                .fillMaxWidth()
-                                .background(Color(0x99000000))
-                                .padding(12.dp)
-                        ) {
-                            val current = options.firstOrNull { it.size == previewSize }
-                            Text(
-                                text = "Preview ${previewSize.width}x${previewSize.height}",
-                                color = Color.White
-                            )
-                            if (current != null) {
-                                Text(
-                                    text = "H.264: ${if (current.h264) "yes" else "no"}   HEVC: ${if (current.hevc) "yes" else "no"}",
-                                    color = Color.White
-                                )
-                            }
-                            if (streaming) {
-                                Text(
-                                    text = "Streaming $streamInfo on port $streamPort. PC connected: ${if (clientConnected) "yes" else "no"}",
-                                    color = Color.Green
-                                )
-                            }
-                            deviceIp?.let { ip ->
-                                Text(
-                                    text = "Wi-Fi: $ip:$streamPort (use this IP in OBS)",
-                                    color = Color.White
-                                )
-                            }
-                            if (status.isNotEmpty()) {
-                                Text(text = status, color = Color.Yellow)
-                            }
-                            Row(
-                                modifier = Modifier
-                                    .padding(top = 8.dp)
-                                    .horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                options.forEach { option ->
-                                    Button(
-                                        enabled = !streaming,
-                                        onClick = { changeResolution(option.size) },
-                                        contentPadding = PaddingValues(horizontal = 10.dp)
-                                    ) {
-                                        Text(option.label)
-                                    }
+
+                                override fun onSurfaceTextureSizeChanged(
+                                    surface: SurfaceTexture, width: Int, height: Int
+                                ) {
                                 }
-                            }
-                            Row(
-                                modifier = Modifier
-                                    .padding(top = 6.dp)
-                                    .horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                fpsOptions.forEach { fps ->
-                                    Button(
-                                        enabled = !streaming,
-                                        onClick = { streamFps = fps },
-                                        contentPadding = PaddingValues(horizontal = 10.dp)
-                                    ) {
-                                        Text("$fps fps")
-                                    }
+
+                                override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+                                    return true
                                 }
-                            }
-                            Button(
-                                onClick = {
-                                    if (streaming) stopStreaming() else startStreaming()
-                                },
-                                modifier = Modifier
-                                    .padding(top = 8.dp)
-                                    .fillMaxWidth()
-                            ) {
-                                Text(if (streaming) "Stop streaming" else "Start streaming")
+
+                                override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
+                                }
                             }
                         }
-                    } else {
-                        Text(
-                            text = "Camera permission is needed",
-                            modifier = Modifier.align(Alignment.Center)
-                        )
                     }
+                )
+
+                PreviewTopBar(modifier = Modifier.align(Alignment.TopCenter))
+                PreviewInfoBar(modifier = Modifier.align(Alignment.BottomCenter))
+            }
+        }
+    }
+
+    @Composable
+    private fun PreviewTopBar(modifier: Modifier = Modifier) {
+        Row(
+            modifier = modifier
+                .fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color(0xCC000000), Color.Transparent)
+                    )
+                )
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "OpenPhoneCam",
+                    color = Color.White,
+                    fontWeight = FontWeight.Black,
+                    fontSize = 20.sp,
+                    letterSpacing = 0.5.sp
+                )
+                Text(
+                    text = "USB / WI-FI LINK",
+                    color = NeonCyan.copy(alpha = 0.9f),
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 3.sp
+                )
+            }
+            StatusPill()
+        }
+    }
+
+    @Composable
+    private fun StatusPill() {
+        val label: String
+        val color: Color
+        when {
+            streaming && clientConnected -> {
+                label = "LIVE"; color = NeonMint
+            }
+            streaming -> {
+                label = "WAITING"; color = NeonCyan
+            }
+            else -> {
+                label = "IDLE"; color = TextMuted
+            }
+        }
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(50))
+                .background(Color(0x99000000))
+                .border(1.dp, color, RoundedCornerShape(50))
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .clip(CircleShape)
+                    .background(color)
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = label,
+                color = color,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.5.sp
+            )
+        }
+    }
+
+    @Composable
+    private fun PreviewInfoBar(modifier: Modifier = Modifier) {
+        Column(
+            modifier = modifier
+                .fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color.Transparent, Color(0xE6000000))
+                    )
+                )
+                .padding(horizontal = 18.dp, vertical = 16.dp)
+        ) {
+            val current = qualityOptions.firstOrNull { it.size == previewSize }
+            Text(
+                text = current?.label ?: "${previewSize.width}×${previewSize.height}",
+                color = NeonCyan,
+                fontSize = 32.sp,
+                fontWeight = FontWeight.Black,
+                letterSpacing = 1.sp
+            )
+            Text(
+                text = "${previewSize.width} × ${previewSize.height} · ${current?.codec ?: "—"} · ${effectiveFps()} fps",
+                color = TextPrimary,
+                fontSize = 12.sp
+            )
+            deviceIp?.let { ip ->
+                Text(
+                    text = "Wi-Fi   $ip:$streamPort",
+                    color = TextMuted,
+                    fontSize = 12.sp
+                )
+            }
+            if (status.isNotEmpty()) {
+                Text(
+                    text = status,
+                    color = NeonPink,
+                    fontSize = 12.sp
+                )
+            }
+        }
+    }
+
+    @Composable
+    private fun ControlPanel() {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color(0xFF080C16), Color(0xFF05060A))
+                    )
+                )
+                .padding(horizontal = 16.dp, vertical = 14.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(1.dp)
+                    .background(
+                        Brush.horizontalGradient(
+                            listOf(NeonCyan, NeonViolet, NeonPink)
+                        )
+                    )
+            )
+            Spacer(Modifier.height(14.dp))
+
+            SectionLabel("QUALITY")
+            Spacer(Modifier.height(8.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                qualityOptions.forEach { q ->
+                    QualityCard(
+                        quality = q,
+                        selected = q.size == previewSize,
+                        enabled = !streaming,
+                        onClick = { changeResolution(q.size) }
+                    )
                 }
             }
+
+            Spacer(Modifier.height(14.dp))
+            SectionLabel("FRAME RATE")
+            Spacer(Modifier.height(8.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                fpsOptions.forEach { fps ->
+                    FpsChip(
+                        fps = fps,
+                        selected = fps == streamFps,
+                        enabled = !streaming,
+                        onClick = { streamFps = fps }
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+            ActionButton(
+                text = if (streaming) "STOP STREAMING" else "START STREAMING",
+                colors = if (streaming) listOf(NeonPink, NeonViolet) else listOf(NeonCyan, NeonViolet),
+                onClick = { if (streaming) stopStreaming() else startStreaming() }
+            )
+        }
+    }
+
+    @Composable
+    private fun SectionLabel(text: String) {
+        Text(
+            text = text,
+            color = TextMuted,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 2.5.sp
+        )
+    }
+
+    @Composable
+    private fun QualityCard(
+        quality: QualityOption,
+        selected: Boolean,
+        enabled: Boolean,
+        onClick: () -> Unit
+    ) {
+        Column(
+            modifier = Modifier
+                .width(86.dp)
+                .clip(RoundedCornerShape(18.dp))
+                .background(if (selected) Color(0x2200E5FF) else Color(0x14FFFFFF))
+                .border(
+                    width = 1.dp,
+                    color = if (selected) NeonCyan else Color(0x1FFFFFFF),
+                    shape = RoundedCornerShape(18.dp)
+                )
+                .clickable(enabled = enabled, onClick = onClick)
+                .padding(vertical = 10.dp, horizontal = 6.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = quality.label,
+                color = if (selected) NeonCyan else TextPrimary,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = "${quality.size.width}×${quality.size.height}",
+                color = TextMuted,
+                fontSize = 9.sp,
+                textAlign = TextAlign.Center
+            )
+            Spacer(Modifier.height(1.dp))
+            Text(
+                text = quality.codec,
+                color = TextMuted.copy(alpha = 0.8f),
+                fontSize = 8.sp,
+                textAlign = TextAlign.Center
+            )
+        }
+    }
+
+    @Composable
+    private fun FpsChip(
+        fps: Int,
+        selected: Boolean,
+        enabled: Boolean,
+        onClick: () -> Unit
+    ) {
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(50))
+                .background(if (selected) Color(0x2200E5FF) else Color(0x14FFFFFF))
+                .border(
+                    width = 1.dp,
+                    color = if (selected) NeonCyan else Color(0x1FFFFFFF),
+                    shape = RoundedCornerShape(50)
+                )
+                .clickable(enabled = enabled, onClick = onClick)
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = "$fps fps",
+                color = if (selected) NeonCyan else TextPrimary,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium
+            )
+        }
+    }
+
+    @Composable
+    private fun ActionButton(
+        text: String,
+        colors: List<Color>,
+        onClick: () -> Unit
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(58.dp)
+                .clip(RoundedCornerShape(20.dp))
+                .background(Brush.horizontalGradient(colors))
+                .clickable(onClick = onClick),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = text,
+                color = Color(0xFF04121A),
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Black,
+                letterSpacing = 2.sp
+            )
+        }
+    }
+
+    @Composable
+    private fun PermissionNeeded() {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(32.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text(
+                text = "CAMERA ACCESS",
+                color = NeonCyan,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 3.sp
+            )
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = "OpenPhoneCam needs the camera to send video to OBS.",
+                color = TextPrimary,
+                fontSize = 15.sp,
+                textAlign = TextAlign.Center
+            )
         }
     }
 
@@ -307,7 +619,7 @@ class MainActivity : ComponentActivity() {
         options = allSizes
             .map { size ->
                 ResolutionOption(
-                    labelFor(size),
+                    qualityLabel(size),
                     size,
                     encoderSupports("video/avc", size),
                     encoderSupports("video/hevc", size)
@@ -315,15 +627,23 @@ class MainActivity : ComponentActivity() {
             }
             .filter { it.h264 || it.hevc }
         options.forEach {
-            Log.d("OpenPhoneCam", "${it.label}: H.264=${it.h264} HEVC=${it.hevc}")
+            Log.d(
+                "OpenPhoneCam",
+                "${it.label} ${it.size.width}x${it.size.height}: H.264=${it.h264} HEVC=${it.hevc}"
+            )
         }
         if (options.isEmpty()) {
             options = listOf(ResolutionOption("1080p", Size(1920, 1080), false, false))
         }
 
-        previewSize = options.firstOrNull { it.size == Size(1920, 1080) }?.size
-            ?: options.firstOrNull { it.size.width * 9 == it.size.height * 16 }?.size
-            ?: options.first().size
+        qualityOptions = buildQualityOptions(options)
+        qualityOptions.forEach {
+            Log.d("OpenPhoneCam", "Quality tier ${it.label} -> ${it.size.width}x${it.size.height}")
+        }
+
+        previewSize = qualityOptions.firstOrNull { it.label == "1080p" }?.size
+            ?: qualityOptions.firstOrNull { isWidescreen(it.size) }?.size
+            ?: qualityOptions.first().size
 
         val ranges = characteristics
             .get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
@@ -341,19 +661,44 @@ class MainActivity : ComponentActivity() {
         Log.d("OpenPhoneCam", "FPS options: $fpsOptions")
     }
 
-    private fun labelFor(size: Size): String {
-        return when (size) {
-            Size(640, 360) -> "360p"
-            Size(854, 480) -> "480p"
-            Size(1280, 720) -> "720p"
-            Size(1920, 1080) -> "1080p"
-            Size(2560, 1440) -> "1440p"
-            Size(2048, 1080) -> "2K"
-            Size(3840, 2160) -> "4K"
-            Size(4096, 2160) -> "DCI 4K"
-            Size(7680, 4320) -> "8K"
-            else -> "${size.width}x${size.height}"
+    private fun qualityLabel(size: Size): String {
+        val w = maxOf(size.width, size.height)
+        val h = minOf(size.width, size.height)
+        val aspect = w.toFloat() / h.toFloat()
+        return when {
+            w >= 7000 || h >= 3200 -> "8K"
+            w >= 3600 || h >= 1600 -> "4K"
+            w >= 2000 && h in 1000..1599 && aspect <= 2.1f -> "2K"
+            h >= 1250 -> "2K"
+            h >= 950 -> "1080p"
+            h >= 600 -> "720p"
+            else -> "480p"
         }
+    }
+
+    private fun buildQualityOptions(all: List<ResolutionOption>): List<QualityOption> {
+        val groups = LinkedHashMap<String, MutableList<ResolutionOption>>()
+        all.forEach { opt -> groups.getOrPut(opt.label) { mutableListOf() }.add(opt) }
+
+        val result = mutableListOf<QualityOption>()
+        TIER_ORDER.forEach { tier ->
+            val group = groups.remove(tier) ?: return@forEach
+            val chosen = group.filter { isWidescreen(it.size) }
+                .maxByOrNull { it.size.width.toLong() * it.size.height }
+                ?: group.maxByOrNull { it.size.width.toLong() * it.size.height }!!
+            result.add(QualityOption(tier, chosen.size, chosen.h264, chosen.hevc))
+        }
+        groups.values.flatten().forEach { opt ->
+            result.add(QualityOption(opt.label, opt.size, opt.h264, opt.hevc))
+        }
+        return result
+    }
+
+    private fun isWidescreen(size: Size): Boolean {
+        val w = maxOf(size.width, size.height).toFloat()
+        val h = minOf(size.width, size.height).toFloat()
+        val aspect = w / h
+        return aspect in 1.7f..1.85f
     }
 
     private val encoderCache = mutableMapOf<String, List<MediaCodecInfo>>()
