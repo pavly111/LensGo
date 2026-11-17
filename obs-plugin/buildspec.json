@@ -33,11 +33,11 @@
     },
     "platformConfig": {
         "macos": {
-            "bundleId": "com.example.plugintemplate-for-obs"
+            "bundleId": "com.pavly111.lensgo"
         }
     },
-    "name": "openphonecam",
-    "displayName": "Plugin Template for OBS",
+    "name": "lensgo",
+    "displayName": "Lens Go",
     "version": "1.0.0",
     "author": "Pavly",
     "website": "https://example.com",

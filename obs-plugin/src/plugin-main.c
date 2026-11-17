@@ -44,7 +44,16 @@ OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
 #define READ_SIZE 65536
 #define FORWARD_RETRY_NS 2000000000ULL
 
-struct phonecam_source {
+#define UDP_MAGIC 0x4F50434Du
+#define UDP_HEADER_SIZE 12
+#define UDP_MAX_PAYLOAD 1400
+#define FEC_K 8
+#define FEC_BLOCK (FEC_K + 1)
+#define RING_SIZE 1024
+#define BLOCK_SLOTS 64
+#define STALL_TIMEOUT_NS 250000000LL
+
+struct lensgo_source {
     obs_source_t *source;
     pthread_t thread;
     bool thread_started;
@@ -64,6 +73,44 @@ struct phonecam_source {
     uint64_t packets;
     uint64_t frames;
     uint64_t decode_errors;
+};
+
+struct udp_header {
+    uint32_t magic;
+    uint32_t seq;
+    uint8_t flags;
+    uint16_t payload_len;
+};
+
+struct chunk {
+    bool valid;
+    uint32_t seq;
+    uint16_t len;
+    uint8_t data[UDP_MAX_PAYLOAD];
+};
+
+struct block_slot {
+    int32_t block_id;
+    uint16_t mask;
+    uint8_t data[FEC_K][UDP_MAX_PAYLOAD];
+    bool dvalid[FEC_K];
+    uint8_t parity[UDP_MAX_PAYLOAD];
+    bool pvalid;
+};
+
+struct udp_ctx {
+    AVCodecContext *ctx;
+    AVCodecParserContext *parser;
+    AVPacket *pkt;
+    AVFrame *frame;
+    uint8_t *detect_buf;
+    size_t detect_len;
+    bool codec_ready;
+    struct chunk ring[RING_SIZE];
+    uint32_t next_seq;
+    struct block_slot blocks[BLOCK_SLOTS];
+    uint64_t stall_ns;
+    struct lensgo_source *s;
 };
 
 static bool file_is_executable(const char *path)
@@ -200,7 +247,7 @@ static int connect_to_address(const char *host, int port)
     return fd;
 }
 
-static void output_frame(struct phonecam_source *s, AVFrame *f)
+static void output_frame(struct lensgo_source *s, AVFrame *f)
 {
     if (f->format != AV_PIX_FMT_YUV420P && f->format != AV_PIX_FMT_YUVJ420P) {
         if (!s->format_warned) {
@@ -235,7 +282,7 @@ static void output_frame(struct phonecam_source *s, AVFrame *f)
     s->frames++;
 }
 
-static void decode_packet(struct phonecam_source *s, AVCodecContext *ctx, AVPacket *pkt, AVFrame *frame)
+static void decode_packet(struct lensgo_source *s, AVCodecContext *ctx, AVPacket *pkt, AVFrame *frame)
 {
     int ret = avcodec_send_packet(ctx, pkt);
     if (ret < 0) {
@@ -302,7 +349,163 @@ static enum AVCodecID detect_codec(const uint8_t *d, int n)
     return AV_CODEC_ID_NONE;
 }
 
-static void run_session(struct phonecam_source *s, int fd, const char *host, int port)
+static bool udp_parse_header(const uint8_t *p, size_t n, struct udp_header *h)
+{
+    if (n < UDP_HEADER_SIZE) return false;
+    uint32_t magic = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+    h->magic = magic;
+    h->seq = ((uint32_t)p[4] << 24) | ((uint32_t)p[5] << 16) | ((uint32_t)p[6] << 8) | (uint32_t)p[7];
+    h->flags = p[8];
+    h->payload_len = ((uint16_t)p[9] << 8) | (uint16_t)p[10];
+    return true;
+}
+
+static void udp_free_ctx(struct udp_ctx *c)
+{
+    if (c->pkt) av_packet_free(&c->pkt);
+    if (c->frame) av_frame_free(&c->frame);
+    if (c->detect_buf) bfree(c->detect_buf);
+    if (c->parser) av_parser_close(c->parser);
+    if (c->ctx) avcodec_free_context(&c->ctx);
+    bfree(c);
+}
+
+static void udp_feed(struct udp_ctx *c, const uint8_t *data, int len)
+{
+    if (!c->codec_ready) {
+        if (c->detect_len + (size_t)len > READ_SIZE) {
+            size_t skip = c->detect_len + (size_t)len - READ_SIZE;
+            memmove(c->detect_buf, c->detect_buf + skip, READ_SIZE - skip);
+            c->detect_len -= skip;
+        }
+        memcpy(c->detect_buf + c->detect_len, data, (size_t)len);
+        c->detect_len += (size_t)len;
+        memset(c->detect_buf + c->detect_len, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+        enum AVCodecID cid = detect_codec(c->detect_buf, (int)c->detect_len);
+        if (cid == AV_CODEC_ID_NONE) return;
+        const AVCodec *codec = avcodec_find_decoder(cid);
+        if (!codec) { obs_log(LOG_ERROR, "no decoder for codec %d", (int)cid); return; }
+        c->ctx = avcodec_alloc_context3(codec);
+        c->parser = av_parser_init(cid);
+        if (!c->ctx || !c->parser) { obs_log(LOG_ERROR, "could not allocate decoder"); return; }
+        c->ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
+        c->ctx->flags2 |= AV_CODEC_FLAG2_FAST;
+        c->ctx->thread_count = 1;
+        if (avcodec_open2(c->ctx, codec, NULL) < 0) { obs_log(LOG_ERROR, "could not open %s decoder",
+                        cid == AV_CODEC_ID_HEVC ? "HEVC" : "H.264"); return; }
+        c->codec_ready = true;
+        obs_log(LOG_INFO, "udp stream codec: %s (%zu bytes buffered)",
+                cid == AV_CODEC_ID_HEVC ? "HEVC" : "H.264", c->detect_len);
+        uint8_t *d = c->detect_buf;
+        int sz = (int)c->detect_len;
+        c->detect_len = 0;
+        memset(c->detect_buf, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+        while (sz > 0) {
+            int used = av_parser_parse2(c->parser, c->ctx, &c->pkt->data, &c->pkt->size, d, sz,
+                                        AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
+            if (used < 0) break;
+            d += used; sz -= used;
+            if (c->pkt->size > 0) { c->s->packets++; decode_packet(c->s, c->ctx, c->pkt, c->frame); }
+        }
+        c->codec_ready = true;
+        return;
+    }
+    uint8_t *dp = (uint8_t *)data;
+    int size = len;
+    while (size > 0) {
+        int used = av_parser_parse2(c->parser, c->ctx, &c->pkt->data, &c->pkt->size, dp, size,
+                                    AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
+        if (used < 0) { c->s->decode_errors++; break; }
+        dp += used;
+        size -= used;
+        if (c->pkt->size > 0) { c->s->packets++; decode_packet(c->s, c->ctx, c->pkt, c->frame); }
+        if (used == 0) break;
+    }
+}
+
+static void udp_flush(struct udp_ctx *c)
+{
+    while (1) {
+        uint32_t s = c->next_seq;
+        struct chunk *ch = &c->ring[s % RING_SIZE];
+        if (ch->valid && ch->seq == s) {
+            udp_feed(c, ch->data, ch->len);
+            ch->valid = false;
+            c->next_seq++;
+            continue;
+        }
+        if (c->codec_ready) {
+            uint32_t bid = s / FEC_BLOCK;
+            int pos = (int)(s % FEC_BLOCK);
+            if (pos < FEC_K) {
+                struct block_slot *b = &c->blocks[bid % BLOCK_SLOTS];
+                if (b->block_id == (int32_t)bid && b->pvalid && !b->dvalid[pos]) {
+                    bool ok = true;
+                    for (int p = 0; p < FEC_K; p++) {
+                        if (p != pos && !b->dvalid[p]) { ok = false; break; }
+                    }
+                    if (ok) {
+                        uint8_t out[UDP_MAX_PAYLOAD];
+                        memcpy(out, b->parity, UDP_MAX_PAYLOAD);
+                        for (int p = 0; p < FEC_K; p++) {
+                            if (p != pos) {
+                                for (int i = 0; i < UDP_MAX_PAYLOAD; i++) out[i] ^= b->data[p][i];
+                            }
+                        }
+                        udp_feed(c, out, UDP_MAX_PAYLOAD);
+                        b->dvalid[pos] = true;
+                        c->next_seq++;
+                        continue;
+                    }
+                }
+            }
+        }
+        break;
+    }
+}
+
+static void udp_check_stall(struct udp_ctx *c)
+{
+    uint32_t s = c->next_seq;
+    struct chunk *ch = &c->ring[s % RING_SIZE];
+    bool deliverable = (ch->valid && ch->seq == s);
+    if (!deliverable && c->codec_ready) {
+        uint32_t bid = s / FEC_BLOCK;
+        int pos = (int)(s % FEC_BLOCK);
+        if (pos < FEC_K) {
+            struct block_slot *b = &c->blocks[bid % BLOCK_SLOTS];
+            if (b->block_id == (int32_t)bid && b->pvalid && !b->dvalid[pos]) {
+                bool ok = true;
+                for (int p = 0; p < FEC_K; p++) {
+                    if (p != pos && !b->dvalid[p]) { ok = false; break; }
+                }
+                if (ok) {
+                    deliverable = true;
+                }
+            }
+        }
+    }
+    if (!deliverable) {
+        uint64_t now = os_gettime_ns();
+        if (c->stall_ns == 0 || (now - c->stall_ns) > STALL_TIMEOUT_NS) {
+            c->stall_ns = now;
+            ch = &c->ring[s % RING_SIZE];
+            ch->valid = false;
+            uint32_t bid = s / FEC_BLOCK;
+            int pos = (int)(s % FEC_BLOCK);
+            if (pos < FEC_K) {
+                struct block_slot *b = &c->blocks[bid % BLOCK_SLOTS];
+                if (b->block_id == (int32_t)bid) b->dvalid[pos] = true;
+            }
+            c->next_seq++;
+            c->stall_ns = 0;
+        }
+    } else {
+        c->stall_ns = 0;
+    }
+}
+
+static void run_session(struct lensgo_source *s, int fd, const char *host, int port)
 {
     s->bytes = 0;
     s->packets = 0;
@@ -444,9 +647,103 @@ cleanup:
     bfree(detect_buf);
 }
 
-static void *phonecam_thread(void *data)
+static void run_udp_session(struct lensgo_source *s, int fd, const char *host, int port)
 {
-    struct phonecam_source *s = data;
+    s->bytes = 0;
+    s->packets = 0;
+    s->frames = 0;
+    s->decode_errors = 0;
+    obs_log(LOG_INFO, "connected to %s:%d (udp)", host, port);
+
+    struct udp_ctx *c = bzalloc(sizeof(struct udp_ctx));
+    c->s = s;
+    c->ctx = NULL;
+    c->parser = NULL;
+    c->pkt = av_packet_alloc();
+    c->frame = av_frame_alloc();
+    c->detect_buf = bmalloc(READ_SIZE + AV_INPUT_BUFFER_PADDING_SIZE);
+    c->detect_len = 0;
+    c->codec_ready = false;
+    c->next_seq = 0;
+    memset(c->ring, 0, sizeof(c->ring));
+    for (int i = 0; i < BLOCK_SLOTS; i++) c->blocks[i].block_id = -1;
+
+    if (!c->pkt || !c->frame || !c->detect_buf) {
+        obs_log(LOG_ERROR, "could not allocate udp session");
+        goto cleanup;
+    }
+
+    uint8_t recv_buf[UDP_MAX_PAYLOAD + UDP_HEADER_SIZE];
+
+    while (!os_atomic_load_bool(&s->stop)) {
+        if (os_atomic_load_long(&s->port) != (long)port) {
+            obs_log(LOG_INFO, "port changed, reconnecting");
+            break;
+        }
+
+        ssize_t n = recv(fd, recv_buf, sizeof(recv_buf), 0);
+        if (n == 0) {
+            obs_log(LOG_INFO, "phone closed the udp connection");
+            break;
+        }
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+                udp_check_stall(c);
+                continue;
+            }
+            obs_log(LOG_WARNING, "receive error %d", errno);
+            break;
+        }
+        if (n < (ssize_t)UDP_HEADER_SIZE) continue;
+
+        s->bytes += (uint64_t)n;
+
+        struct udp_header h;
+        if (!udp_parse_header(recv_buf, (size_t)n, &h)) continue;
+        if (h.magic != UDP_MAGIC) continue;
+        if ((uint32_t)(h.seq - c->next_seq) >= RING_SIZE) continue;
+
+        uint32_t idx = h.seq % RING_SIZE;
+        struct chunk *ch = &c->ring[idx];
+        if (ch->valid && ch->seq == h.seq) continue;
+        memset(ch->data, 0, UDP_MAX_PAYLOAD);
+        ch->valid = true;
+        ch->seq = h.seq;
+        ch->len = h.payload_len;
+        memcpy(ch->data, recv_buf + UDP_HEADER_SIZE, h.payload_len);
+
+        uint32_t bid = h.seq / FEC_BLOCK;
+        int pos = (int)(h.seq % FEC_BLOCK);
+        struct block_slot *b = &c->blocks[bid % BLOCK_SLOTS];
+        if (b->block_id != (int32_t)bid) {
+            memset(b, 0, sizeof(*b));
+            b->block_id = (int32_t)bid;
+        }
+        b->mask |= (uint16_t)(1u << pos);
+        if (pos < FEC_K) {
+            memcpy(b->data[pos], ch->data, UDP_MAX_PAYLOAD);
+            b->dvalid[pos] = true;
+        } else {
+            memcpy(b->parity, ch->data, UDP_MAX_PAYLOAD);
+            b->pvalid = true;
+        }
+
+        udp_flush(c);
+        c->stall_ns = 0;
+    }
+
+    obs_log(LOG_INFO, "udp session ended: %llu bytes, %llu packets, %llu frames, %llu decode errors",
+            (unsigned long long)s->bytes, (unsigned long long)s->packets,
+            (unsigned long long)s->frames, (unsigned long long)s->decode_errors);
+
+cleanup:
+    udp_free_ctx(c);
+    obs_source_output_video(s->source, NULL);
+}
+
+static void *lensgo_thread(void *data)
+{
+    struct lensgo_source *s = data;
 
     while (!os_atomic_load_bool(&s->stop)) {
         int port = (int)os_atomic_load_long(&s->port);
@@ -459,6 +756,7 @@ static void *phonecam_thread(void *data)
         snprintf(adb_path, sizeof(adb_path), "%s", s->adb_path);
         pthread_mutex_unlock(&s->lock);
 
+        int fd = -1;
         if (mode == CONNECTION_USB) {
             snprintf(host, sizeof(host), "%s", "127.0.0.1");
             uint64_t now = os_gettime_ns();
@@ -480,18 +778,45 @@ static void *phonecam_thread(void *data)
                     s->forward_ready_logged = false;
                 }
             }
-        } else if (host[0] == '\0') {
+            fd = connect_to_address(host, port);
+        } else if (mode == CONNECTION_WIFI) {
+            if (host[0] == '\0') {
+                if (!s->warned_no_address) {
+                    obs_log(LOG_WARNING, "Wi-Fi mode is selected but no phone IP address is set");
+                    s->warned_no_address = true;
+                }
+                os_sleep_ms(500);
+                continue;
+            }
+            s->warned_no_address = false;
+            fd = socket(AF_INET, SOCK_DGRAM, 0);
+            if (fd >= 0) {
+                struct sockaddr_in addr;
+                memset(&addr, 0, sizeof(addr));
+                addr.sin_family = AF_INET;
+                addr.sin_port = htons((uint16_t)port);
+                if (inet_pton(AF_INET, host, &addr.sin_addr) <= 0) {
+                    close(fd);
+                    fd = -1;
+                } else if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+                    close(fd);
+                    fd = -1;
+                }
+            }
+            if (fd >= 0) {
+                uint8_t hello[1] = {0};
+                ssize_t hn = send(fd, hello, sizeof(hello), 0);
+                if (hn < 0) { close(fd); fd = -1; }
+            }
+        } else {
             if (!s->warned_no_address) {
-                obs_log(LOG_WARNING, "Wi-Fi mode is selected but no phone IP address is set");
+                obs_log(LOG_WARNING, "connection mode is unknown");
                 s->warned_no_address = true;
             }
             os_sleep_ms(500);
             continue;
-        } else {
-            s->warned_no_address = false;
         }
 
-        int fd = connect_to_address(host, port);
         if (fd < 0) {
             uint64_t now = os_gettime_ns();
             if (s->last_connect_log_ns == 0 || now - s->last_connect_log_ns > 5000000000ULL) {
@@ -504,20 +829,24 @@ static void *phonecam_thread(void *data)
         }
         s->last_connect_log_ns = 0;
 
-        run_session(s, fd, host, port);
-        close(fd);
+        if (mode == CONNECTION_USB) {
+            run_session(s, fd, host, port);
+        } else {
+            run_udp_session(s, fd, host, port);
+        }
+        if (mode == CONNECTION_USB) close(fd);
         os_sleep_ms(300);
     }
     return NULL;
 }
 
-static const char *phonecam_get_name(void *unused)
+static const char *lensgo_get_name(void *unused)
 {
     UNUSED_PARAMETER(unused);
-    return "OpenPhoneCam";
+    return "Lens Go";
 }
 
-static void phonecam_defaults(obs_data_t *settings)
+static void lensgo_defaults(obs_data_t *settings)
 {
     obs_data_set_default_int(settings, SETTING_PORT, DEFAULT_PORT);
     obs_data_set_default_int(settings, SETTING_MODE, CONNECTION_USB);
@@ -526,7 +855,7 @@ static void phonecam_defaults(obs_data_t *settings)
     obs_data_set_default_int(settings, SETTING_LATENCY, LATENCY_LOWEST);
 }
 
-static bool phonecam_mode_modified(obs_properties_t *props, obs_property_t *p, obs_data_t *settings)
+static bool lensgo_mode_modified(obs_properties_t *props, obs_property_t *p, obs_data_t *settings)
 {
     UNUSED_PARAMETER(p);
 
@@ -544,9 +873,9 @@ static bool phonecam_mode_modified(obs_properties_t *props, obs_property_t *p, o
     return false;
 }
 
-static obs_properties_t *phonecam_properties(void *data)
+static obs_properties_t *lensgo_properties(void *data)
 {
-    struct phonecam_source *s = data;
+    struct lensgo_source *s = data;
     long current_mode = s ? (long)os_atomic_load_long(&s->mode) : CONNECTION_USB;
 
     obs_properties_t *props = obs_properties_create();
@@ -570,7 +899,7 @@ static obs_properties_t *phonecam_properties(void *data)
     if (adb) {
         obs_property_set_visible(adb, usb);
     }
-    obs_property_set_modified_callback(mode, phonecam_mode_modified);
+    obs_property_set_modified_callback(mode, lensgo_mode_modified);
 
     obs_property_t *latency = obs_properties_add_list(props, SETTING_LATENCY, "Latency mode",
                                                       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
@@ -579,9 +908,9 @@ static obs_properties_t *phonecam_properties(void *data)
     return props;
 }
 
-static void phonecam_update(void *data, obs_data_t *settings)
+static void lensgo_update(void *data, obs_data_t *settings)
 {
-    struct phonecam_source *s = data;
+    struct lensgo_source *s = data;
 
     long port = (long)obs_data_get_int(settings, SETTING_PORT);
     if (port < 1024 || port > 65535) {
@@ -615,17 +944,17 @@ static void phonecam_update(void *data, obs_data_t *settings)
     obs_source_set_async_unbuffered(s->source, lowest);
 }
 
-static void *phonecam_create(obs_data_t *settings, obs_source_t *source)
+static void *lensgo_create(obs_data_t *settings, obs_source_t *source)
 {
-    struct phonecam_source *s = bzalloc(sizeof(struct phonecam_source));
+    struct lensgo_source *s = bzalloc(sizeof(struct lensgo_source));
     s->source = source;
     os_atomic_set_bool(&s->stop, false);
     os_atomic_set_long(&s->port, DEFAULT_PORT);
     os_atomic_set_long(&s->mode, CONNECTION_USB);
     pthread_mutex_init(&s->lock, NULL);
-    phonecam_update(s, settings);
+    lensgo_update(s, settings);
 
-    if (pthread_create(&s->thread, NULL, phonecam_thread, s) == 0) {
+    if (pthread_create(&s->thread, NULL, lensgo_thread, s) == 0) {
         s->thread_started = true;
         obs_log(LOG_INFO, "source created, waiting for the phone");
     } else {
@@ -634,9 +963,9 @@ static void *phonecam_create(obs_data_t *settings, obs_source_t *source)
     return s;
 }
 
-static void phonecam_destroy(void *data)
+static void lensgo_destroy(void *data)
 {
-    struct phonecam_source *s = data;
+    struct lensgo_source *s = data;
 
     os_atomic_set_bool(&s->stop, true);
     if (s->thread_started) {
@@ -646,23 +975,23 @@ static void phonecam_destroy(void *data)
     bfree(s);
 }
 
-static struct obs_source_info phonecam_info = {
-    .id = "openphonecam_source",
+static struct obs_source_info lensgo_info = {
+    .id = "lensgo_source",
     .type = OBS_SOURCE_TYPE_INPUT,
     .output_flags = OBS_SOURCE_ASYNC_VIDEO | OBS_SOURCE_DO_NOT_DUPLICATE,
     .icon_type = OBS_ICON_TYPE_CAMERA,
-    .get_name = phonecam_get_name,
-    .get_defaults = phonecam_defaults,
-    .get_properties = phonecam_properties,
-    .update = phonecam_update,
-    .create = phonecam_create,
-    .destroy = phonecam_destroy,
+    .get_name = lensgo_get_name,
+    .get_defaults = lensgo_defaults,
+    .get_properties = lensgo_properties,
+    .update = lensgo_update,
+    .create = lensgo_create,
+    .destroy = lensgo_destroy,
 };
 
 bool obs_module_load(void)
 {
     unsigned int v = avcodec_version();
-    obs_register_source(&phonecam_info);
+    obs_register_source(&lensgo_info);
     obs_log(LOG_INFO, "plugin loaded successfully (version %s)", PLUGIN_VERSION);
     obs_log(LOG_INFO, "libavcodec %u.%u.%u", v >> 16, (v >> 8) & 0xff, v & 0xff);
     return true;

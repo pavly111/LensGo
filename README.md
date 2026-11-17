@@ -1,4 +1,4 @@
-# OpenPhoneCam
+# Lens Go
 
 A free, open-source tool that turns your Android phone into a low-latency camera source for OBS Studio, over a USB cable.
 
@@ -7,9 +7,9 @@ A free, open-source tool that turns your Android phone into a low-latency camera
 ## How it works
 
     Phone camera -> hardware H.264 encoder -> TCP server on port 5000
-        -> adb forward (set up automatically by the plugin) -> OBS plugin (FFmpeg decoder) -> "OpenPhoneCam" source in OBS
+        -> adb forward (set up automatically by the plugin) -> OBS plugin (FFmpeg decoder) -> "Lens Go" source in OBS
 
-- `android-app/` is the phone app (Kotlin). It captures the camera, encodes it with the phone's hardware encoder, and serves the stream on port 5000.
+- `lensgo-app/` is the phone app (Kotlin). It captures the camera, encodes it with the phone's hardware encoder, and serves the stream on port 5000.
 - `obs-plugin/` is the OBS Studio plugin (C). It sets up `adb forward` for you (or connects over Wi-Fi), decodes the stream, and shows it as a video source.
 
 ## Features
@@ -34,8 +34,8 @@ A free, open-source tool that turns your Android phone into a low-latency camera
 
 1. Build and install the phone app (see "Building from source").
 2. Connect the phone to your computer with the USB cable and allow USB debugging.
-3. Open the OpenPhoneCam app, choose a resolution, and tap **Start streaming**.
-4. In OBS, add a source with **Sources > + > OpenPhoneCam**. Leave **Connection** on **USB** and the plugin runs `adb forward tcp:5000 tcp:5000` for you.
+3. Open the Lens Go app, choose a resolution, and tap **Start streaming**.
+4. In OBS, add a source with **Sources > + > Lens Go**. Leave **Connection** on **USB** and the plugin runs `adb forward tcp:5000 tcp:5000` for you.
 
    To stream over Wi-Fi instead, make sure the phone and computer are on the same network, set **Connection** to **Wi-Fi**, and enter the phone's IP address shown in the app (for example `192.168.1.20`).
 
@@ -62,7 +62,7 @@ USB is still slightly more consistent than Wi-Fi because it has no wireless retr
 ### Android app
 
 1. Install Android Studio.
-2. Open the `android-app` folder.
+2. Open the `lensgo-app` folder.
 3. Connect your phone and click **Run**.
 
 ### OBS plugin (macOS)
@@ -73,11 +73,11 @@ You need the full Xcode app, CMake (`brew install cmake`) and OBS Studio.
     cmake --preset macos
     cmake --build --preset macos
     mkdir -p ~/Library/Application\ Support/obs-studio/plugins
-    cp -R build_macos/RelWithDebInfo/openphonecam.plugin ~/Library/Application\ Support/obs-studio/plugins/
-    install_name_tool -add_rpath /Applications/OBS.app/Contents/Frameworks ~/Library/Application\ Support/obs-studio/plugins/openphonecam.plugin/Contents/MacOS/openphonecam
-    codesign --force --deep --sign - ~/Library/Application\ Support/obs-studio/plugins/openphonecam.plugin
+    cp -R build_macos/RelWithDebInfo/lensgo.plugin ~/Library/Application\ Support/obs-studio/plugins/
+    install_name_tool -add_rpath /Applications/OBS.app/Contents/Frameworks ~/Library/Application\ Support/obs-studio/plugins/lensgo.plugin/Contents/MacOS/lensgo
+    codesign --force --deep --sign - ~/Library/Application\ Support/obs-studio/plugins/lensgo.plugin
 
-Restart OBS, then check **Help > Log Files > View Current Log** for lines starting with `[openphonecam]`.
+Restart OBS, then check **Help > Log Files > View Current Log** for lines starting with `[lensgo]`.
 
 ## Tested on
 
