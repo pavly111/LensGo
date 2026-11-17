@@ -5,20 +5,20 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
-private val FuturisticColorScheme = darkColorScheme(
-    primary = NeonCyan,
-    onPrimary = Color(0xFF04121A),
-    secondary = NeonViolet,
+private val MonochromeColorScheme = darkColorScheme(
+    primary = AccentRed,
+    onPrimary = Color.White,
+    secondary = AccentRedDark,
     onSecondary = Color.White,
-    tertiary = NeonMint,
-    onTertiary = Color(0xFF04121A),
-    background = BgDeep,
+    tertiary = AccentRed,
+    onTertiary = Color.White,
+    background = BgBlack,
     onBackground = TextPrimary,
-    surface = BgPanel,
+    surface = Surface1,
     onSurface = TextPrimary,
-    surfaceVariant = BgPanel,
+    surfaceVariant = Surface2,
     onSurfaceVariant = TextMuted,
-    error = DangerRed,
+    error = AccentRed,
     onError = Color.White
 )
 
@@ -28,7 +28,7 @@ fun OpenPhoneCamTheme(
     content: @Composable () -> Unit
 ) {
     MaterialTheme(
-        colorScheme = FuturisticColorScheme,
+        colorScheme = MonochromeColorScheme,
         typography = Typography,
         content = content
     )

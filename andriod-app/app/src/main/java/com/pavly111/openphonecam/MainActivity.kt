@@ -64,12 +64,19 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import com.pavly111.openphonecam.ui.theme.AccentGradient
+import com.pavly111.openphonecam.ui.theme.AccentRed
+import com.pavly111.openphonecam.ui.theme.AccentRedDark
+import com.pavly111.openphonecam.ui.theme.ActionGradient
+import com.pavly111.openphonecam.ui.theme.ActionGradientStop
 import com.pavly111.openphonecam.ui.theme.BackgroundGradient
-import com.pavly111.openphonecam.ui.theme.NeonCyan
-import com.pavly111.openphonecam.ui.theme.NeonMint
-import com.pavly111.openphonecam.ui.theme.NeonPink
-import com.pavly111.openphonecam.ui.theme.NeonViolet
+import com.pavly111.openphonecam.ui.theme.BgBlack
 import com.pavly111.openphonecam.ui.theme.OpenPhoneCamTheme
+import com.pavly111.openphonecam.ui.theme.PanelGradient
+import com.pavly111.openphonecam.ui.theme.Stroke
+import com.pavly111.openphonecam.ui.theme.Surface2
+import com.pavly111.openphonecam.ui.theme.Surface3
+import com.pavly111.openphonecam.ui.theme.TextDim
 import com.pavly111.openphonecam.ui.theme.TextMuted
 import com.pavly111.openphonecam.ui.theme.TextPrimary
 import java.net.Inet4Address
@@ -149,26 +156,20 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             OpenPhoneCamTheme {
-                OpenPhoneCamScreen()
-            }
-        }
-    }
-
-    @Composable
-    private fun OpenPhoneCamScreen() {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(BackgroundGradient)
-        ) {
-            if (!permissionGranted) {
-                PermissionNeeded()
-                return@Box
-            }
-
-            Column(modifier = Modifier.fillMaxSize()) {
-                PreviewArea(modifier = Modifier.weight(1f))
-                ControlPanel()
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(BackgroundGradient)
+                ) {
+                    if (!permissionGranted) {
+                        PermissionNeeded()
+                        return@Box
+                    }
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        PreviewArea(modifier = Modifier.weight(1f))
+                        ControlPanel()
+                    }
+                }
             }
         }
     }
@@ -176,17 +177,15 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun PreviewArea(modifier: Modifier = Modifier) {
         Box(
-            modifier = modifier
-                .fillMaxWidth(),
+            modifier = modifier.fillMaxWidth(),
             contentAlignment = Alignment.Center
         ) {
             Box(
                 modifier = Modifier
-                    .fillMaxWidth()
                     .aspectRatio(previewSize.height.toFloat() / previewSize.width.toFloat())
-                    .clip(RoundedCornerShape(26.dp))
-                    .background(Color.Black)
-                    .border(1.dp, NeonCyan.copy(alpha = 0.28f), RoundedCornerShape(26.dp))
+                    .clip(RoundedCornerShape(24.dp))
+                    .background(BgBlack)
+                    .border(1.dp, Stroke, RoundedCornerShape(24.dp))
             ) {
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
@@ -216,9 +215,48 @@ class MainActivity : ComponentActivity() {
                     }
                 )
 
-                PreviewTopBar(modifier = Modifier.align(Alignment.TopCenter))
-                PreviewInfoBar(modifier = Modifier.align(Alignment.BottomCenter))
+                if (streaming) {
+                    StreamNotch(modifier = Modifier.align(Alignment.TopCenter))
+                } else {
+                    PreviewTopBar(modifier = Modifier.align(Alignment.TopCenter))
+                }
             }
+        }
+    }
+
+    @Composable
+    private fun StreamNotch(modifier: Modifier = Modifier) {
+        val quality = qualityOptions.firstOrNull { it.size == previewSize }
+        Row(
+            modifier = modifier
+                .padding(top = 12.dp)
+                .clip(RoundedCornerShape(50))
+                .background(Color(0xE6000000))
+                .border(1.dp, AccentRed.copy(alpha = 0.8f), RoundedCornerShape(50))
+                .padding(horizontal = 14.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .clip(CircleShape)
+                    .background(AccentRed)
+            )
+            Spacer(Modifier.width(7.dp))
+            Text(
+                text = quality?.label ?: "${previewSize.width}x${previewSize.height}",
+                color = TextPrimary,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(text = "·", color = TextDim, fontSize = 13.sp)
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = "${effectiveFps()} fps",
+                color = TextMuted,
+                fontSize = 13.sp
+            )
         }
     }
 
@@ -245,7 +283,7 @@ class MainActivity : ComponentActivity() {
                 )
                 Text(
                     text = "USB / WI-FI LINK",
-                    color = NeonCyan.copy(alpha = 0.9f),
+                    color = TextMuted,
                     fontSize = 9.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 3.sp
@@ -261,10 +299,10 @@ class MainActivity : ComponentActivity() {
         val color: Color
         when {
             streaming && clientConnected -> {
-                label = "LIVE"; color = NeonMint
+                label = "LIVE"; color = AccentRed
             }
             streaming -> {
-                label = "WAITING"; color = NeonCyan
+                label = "WAITING"; color = AccentRed
             }
             else -> {
                 label = "IDLE"; color = TextMuted
@@ -296,114 +334,130 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun PreviewInfoBar(modifier: Modifier = Modifier) {
-        Column(
-            modifier = modifier
-                .fillMaxWidth()
-                .background(
-                    Brush.verticalGradient(
-                        listOf(Color.Transparent, Color(0xE6000000))
-                    )
-                )
-                .padding(horizontal = 18.dp, vertical = 16.dp)
-        ) {
-            val current = qualityOptions.firstOrNull { it.size == previewSize }
-            Text(
-                text = current?.label ?: "${previewSize.width}×${previewSize.height}",
-                color = NeonCyan,
-                fontSize = 32.sp,
-                fontWeight = FontWeight.Black,
-                letterSpacing = 1.sp
-            )
-            Text(
-                text = "${previewSize.width} × ${previewSize.height} · ${current?.codec ?: "—"} · ${effectiveFps()} fps",
-                color = TextPrimary,
-                fontSize = 12.sp
-            )
-            deviceIp?.let { ip ->
-                Text(
-                    text = "Wi-Fi   $ip:$streamPort",
-                    color = TextMuted,
-                    fontSize = 12.sp
-                )
-            }
-            if (status.isNotEmpty()) {
-                Text(
-                    text = status,
-                    color = NeonPink,
-                    fontSize = 12.sp
-                )
-            }
-        }
-    }
-
-    @Composable
     private fun ControlPanel() {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(
-                    Brush.verticalGradient(
-                        listOf(Color(0xFF080C16), Color(0xFF05060A))
-                    )
-                )
-                .padding(horizontal = 16.dp, vertical = 14.dp)
+                .background(PanelGradient)
+                .padding(horizontal = 12.dp, vertical = 8.dp)
         ) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(1.dp)
-                    .background(
-                        Brush.horizontalGradient(
-                            listOf(NeonCyan, NeonViolet, NeonPink)
+                    .background(AccentGradient)
+            )
+            Spacer(Modifier.height(6.dp))
+
+            if (streaming) {
+                Box(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    ActionButton(
+                        text = "STOP STREAMING",
+                        modifier = Modifier.width(168.dp),
+                        colors = ActionGradientStop,
+                        onClick = { stopStreaming() }
+                    )
+                }
+            } else {
+                SectionLabel("QUALITY")
+                Spacer(Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    qualityOptions.forEach { q ->
+                        QualityCard(
+                            quality = q,
+                            selected = q.size == previewSize,
+                            onClick = { changeResolution(q.size) }
                         )
-                    )
-            )
-            Spacer(Modifier.height(14.dp))
+                    }
+                }
 
-            SectionLabel("QUALITY")
-            Spacer(Modifier.height(8.dp))
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                qualityOptions.forEach { q ->
-                    QualityCard(
-                        quality = q,
-                        selected = q.size == previewSize,
-                        enabled = !streaming,
-                        onClick = { changeResolution(q.size) }
+                Spacer(Modifier.height(8.dp))
+                SectionLabel("FRAME RATE")
+                Spacer(Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    fpsOptions.forEach { fps ->
+                        FpsChip(
+                            fps = fps,
+                            selected = fps == streamFps,
+                            onClick = { streamFps = fps }
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(8.dp))
+                WifiCard()
+
+                if (status.isNotEmpty()) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = status,
+                        color = AccentRed,
+                        fontSize = 11.sp
+                    )
+                }
+
+                Spacer(Modifier.height(8.dp))
+                Box(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    ActionButton(
+                        text = "START STREAMING",
+                        modifier = Modifier.width(200.dp),
+                        colors = ActionGradient,
+                        onClick = { startStreaming() }
                     )
                 }
             }
+        }
+    }
 
-            Spacer(Modifier.height(14.dp))
-            SectionLabel("FRAME RATE")
-            Spacer(Modifier.height(8.dp))
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                fpsOptions.forEach { fps ->
-                    FpsChip(
-                        fps = fps,
-                        selected = fps == streamFps,
-                        enabled = !streaming,
-                        onClick = { streamFps = fps }
-                    )
-                }
-            }
-
-            Spacer(Modifier.height(16.dp))
-            ActionButton(
-                text = if (streaming) "STOP STREAMING" else "START STREAMING",
-                colors = if (streaming) listOf(NeonPink, NeonViolet) else listOf(NeonCyan, NeonViolet),
-                onClick = { if (streaming) stopStreaming() else startStreaming() }
+    @Composable
+    private fun WifiCard() {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(Surface2)
+                .border(1.dp, Stroke, RoundedCornerShape(12.dp))
+                .padding(horizontal = 12.dp, vertical = 6.dp)
+        ) {
+            Text(
+                text = "WI-FI",
+                color = TextMuted,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 2.sp
             )
+            Spacer(Modifier.height(2.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .background(if (deviceIp != null) AccentRed else TextDim)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = deviceIp?.let { "$it:$streamPort" } ?: "not connected",
+                    color = if (deviceIp != null) TextPrimary else TextDim,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
     }
 
@@ -412,9 +466,9 @@ class MainActivity : ComponentActivity() {
         Text(
             text = text,
             color = TextMuted,
-            fontSize = 11.sp,
+            fontSize = 10.sp,
             fontWeight = FontWeight.Bold,
-            letterSpacing = 2.5.sp
+            letterSpacing = 2.sp
         )
     }
 
@@ -422,41 +476,33 @@ class MainActivity : ComponentActivity() {
     private fun QualityCard(
         quality: QualityOption,
         selected: Boolean,
-        enabled: Boolean,
         onClick: () -> Unit
     ) {
         Column(
             modifier = Modifier
-                .width(86.dp)
-                .clip(RoundedCornerShape(18.dp))
-                .background(if (selected) Color(0x2200E5FF) else Color(0x14FFFFFF))
+                .width(70.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(if (selected) Color(0x1AFF2D2D) else Surface2)
                 .border(
                     width = 1.dp,
-                    color = if (selected) NeonCyan else Color(0x1FFFFFFF),
-                    shape = RoundedCornerShape(18.dp)
+                    color = if (selected) AccentRed else Stroke,
+                    shape = RoundedCornerShape(14.dp)
                 )
-                .clickable(enabled = enabled, onClick = onClick)
-                .padding(vertical = 10.dp, horizontal = 6.dp),
+                .clickable(onClick = onClick)
+                .padding(vertical = 7.dp, horizontal = 4.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
                 text = quality.label,
-                color = if (selected) NeonCyan else TextPrimary,
-                fontSize = 15.sp,
+                color = if (selected) AccentRed else TextPrimary,
+                fontSize = 13.sp,
                 fontWeight = FontWeight.Bold
             )
-            Spacer(Modifier.height(2.dp))
+            Spacer(Modifier.height(1.dp))
             Text(
                 text = "${quality.size.width}×${quality.size.height}",
                 color = TextMuted,
                 fontSize = 9.sp,
-                textAlign = TextAlign.Center
-            )
-            Spacer(Modifier.height(1.dp))
-            Text(
-                text = quality.codec,
-                color = TextMuted.copy(alpha = 0.8f),
-                fontSize = 8.sp,
                 textAlign = TextAlign.Center
             )
         }
@@ -466,26 +512,25 @@ class MainActivity : ComponentActivity() {
     private fun FpsChip(
         fps: Int,
         selected: Boolean,
-        enabled: Boolean,
         onClick: () -> Unit
     ) {
         Box(
             modifier = Modifier
                 .clip(RoundedCornerShape(50))
-                .background(if (selected) Color(0x2200E5FF) else Color(0x14FFFFFF))
+                .background(if (selected) Color(0x1AFF2D2D) else Surface2)
                 .border(
                     width = 1.dp,
-                    color = if (selected) NeonCyan else Color(0x1FFFFFFF),
+                    color = if (selected) AccentRed else Stroke,
                     shape = RoundedCornerShape(50)
                 )
-                .clickable(enabled = enabled, onClick = onClick)
-                .padding(horizontal = 16.dp, vertical = 8.dp),
+                .clickable(onClick = onClick)
+                .padding(horizontal = 12.dp, vertical = 6.dp),
             contentAlignment = Alignment.Center
         ) {
             Text(
                 text = "$fps fps",
-                color = if (selected) NeonCyan else TextPrimary,
-                fontSize = 13.sp,
+                color = if (selected) AccentRed else TextPrimary,
+                fontSize = 12.sp,
                 fontWeight = FontWeight.Medium
             )
         }
@@ -494,24 +539,24 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun ActionButton(
         text: String,
-        colors: List<Color>,
+        modifier: Modifier = Modifier,
+        colors: Brush,
         onClick: () -> Unit
     ) {
         Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(58.dp)
-                .clip(RoundedCornerShape(20.dp))
-                .background(Brush.horizontalGradient(colors))
+            modifier = modifier
+                .height(42.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(colors)
                 .clickable(onClick = onClick),
             contentAlignment = Alignment.Center
         ) {
             Text(
                 text = text,
-                color = Color(0xFF04121A),
-                fontSize = 16.sp,
+                color = Color.White,
+                fontSize = 13.sp,
                 fontWeight = FontWeight.Black,
-                letterSpacing = 2.sp
+                letterSpacing = 1.5.sp
             )
         }
     }
@@ -527,7 +572,7 @@ class MainActivity : ComponentActivity() {
         ) {
             Text(
                 text = "CAMERA ACCESS",
-                color = NeonCyan,
+                color = AccentRed,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 3.sp
